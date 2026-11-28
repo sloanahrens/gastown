@@ -557,7 +557,9 @@ type TrendHour struct {
 }
 
 // TrendPoint is one landing's stage times, off its "stages: lint Ns, gate Ns,
-// om Ns" line. OMSecs is nil when the review did not run.
+// om Ns" line. OMSecs is nil when the review did not run; a reused landing
+// carries the cost its stored review took, and is nil only when that suffix
+// does not parse (gt-i99dm3).
 type TrendPoint struct {
 	At       time.Time `json:"at"`
 	LintSecs float64   `json:"lint_secs"`
@@ -630,9 +632,10 @@ type LandingRow struct {
 	GateSecs    *float64 `json:"gate_secs,omitempty"`
 	OMSecs      *float64 `json:"om_secs,omitempty"`
 	// Reused marks a landing that reused a stored review instead of running
-	// om. Its om cell reads "reused" rather than the dash of a landing with no
-	// review, because the review did happen, just earlier. OMSecs stays nil, so
-	// medians and totals do not change (gt-amwavi).
+	// om. It stands beside OMSecs rather than instead of it: OMSecs is the
+	// stored review's cost, which joins the medians and totals like a run of
+	// that length. OMSecs is nil only when the reused suffix does not parse,
+	// and the landing is then left out of the om time figures (gt-i99dm3).
 	Reused bool `json:"om_reused,omitempty"`
 	// ShipSecs is the landing's total ship time, dispatched to shipped in
 	// seconds: the number the Ship time tile reports as a median. It is nil for
