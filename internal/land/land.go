@@ -559,20 +559,29 @@ func ciGateContext(g GateResult) string {
 func (l *Lander) candidateGate(ctx context.Context, wt Repo, dir string, w Work, merged string) (CandidateResult, GateResult, error) {
 	start := time.Now()
 	cres := l.Candidate.Run(ctx, wt, dir, w, merged)
-	step := StepResult{Name: StageCI, Command: cres.Context, Elapsed: time.Since(start), Tail: cres.Tail}
+	gres, err := l.renderCandidate(w, cres, time.Since(start))
+	return cres, gres, err
+}
+
+// renderCandidate renders the candidate run cres as the GateResult the gate
+// step reads: a passed run is a passed verdict, a red run hands its log tail to
+// the CI-failure watch and is a gate result rather than an error, and a run
+// that errs or reports nothing is an *InfraError.
+func (l *Lander) renderCandidate(w Work, cres CandidateResult, elapsed time.Duration) (GateResult, error) {
+	step := StepResult{Name: StageCI, Command: cres.Context, Elapsed: elapsed, Tail: cres.Tail}
 	if cres.Err != nil {
-		return cres, GateResult{Steps: []StepResult{step}}, &InfraError{Stage: StageCI, Err: cres.Err}
+		return GateResult{Steps: []StepResult{step}}, &InfraError{Stage: StageCI, Err: cres.Err}
 	}
 	switch cres.State {
 	case CandidatePassed:
-		return cres, GateResult{Passed: true, Steps: []StepResult{step}}, nil
+		return GateResult{Passed: true, Steps: []StepResult{step}}, nil
 	case CandidateFailed:
 		step.ExitCode = 1
 		l.ciFailure(w, cres)
 		l.logf("%s: %s failed on the candidate %s (%s); the job log tail goes with the rework", w.BeadID, cres.Context, shortSHA(cres.SHA), cres.Branch)
-		return cres, GateResult{Steps: []StepResult{step}}, nil
+		return GateResult{Steps: []StepResult{step}}, nil
 	default:
-		return cres, GateResult{Steps: []StepResult{step}}, &InfraError{Stage: StageCI, Err: fmt.Errorf(
+		return GateResult{Steps: []StepResult{step}}, &InfraError{Stage: StageCI, Err: fmt.Errorf(
 			"%w: %s reported nothing on the candidate %s (%s) within its wait window",
 			ErrCISilence, cres.Context, shortSHA(cres.SHA), cres.Branch)}
 	}
