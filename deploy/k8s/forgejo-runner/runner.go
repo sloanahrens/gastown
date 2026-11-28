@@ -159,6 +159,8 @@ var (
 	// memoryRE is the memory grammar: the same whole-number-and-suffix shape as
 	// storage.
 	memoryRE = storageRE
+	// wholeCoresRE is the CPU quota grammar: a positive whole number of cores.
+	wholeCoresRE = regexp.MustCompile(`^[1-9][0-9]*$`)
 )
 
 // labelSeparator joins a runner label's name to its image in "name:docker://image".
@@ -225,6 +227,10 @@ type Values struct {
 	// DindResources stays the limit. An empty field takes the limit, and
 	// validate refuses a request larger than it (gt-d6a3mh).
 	DindRequests Share
+	// CPUQuota is the whole cores a job may use, written as CI_CPU_QUOTA; it must
+	// be a positive whole number no larger than the engine limit's whole cores.
+	// Empty derives those whole cores from DindResources.CPU (gt-j0da7b).
+	CPUQuota string
 }
 
 // Manifests is what Build returns, in the order Render writes them.
@@ -478,6 +484,9 @@ func (v Values) validate() error {
 	if err := validateDindRequests(v.DindRequests, v.DindResources); err != nil {
 		return err
 	}
+	if err := validateCPUQuota(v.CPUQuota, v.DindResources.CPU); err != nil {
+		return err
+	}
 	if !storageRE.MatchString(v.DindStorage) {
 		return fmt.Errorf("the engine claim storage %q: want a whole number and one of Ki, Mi, Gi or Ti, such as 40Gi", v.DindStorage)
 	}
@@ -523,6 +532,34 @@ func validateDindRequests(requests, limits Share) error {
 		if request.Cmp(limit) > 0 {
 			return fmt.Errorf("Values.DindRequests.Memory %q is larger than the Values.DindResources limit %q: want a request at most the limit", requests.Memory, limits.Memory)
 		}
+	}
+	return nil
+}
+
+// validateCPUQuota refuses a Values.CPUQuota that is not a positive whole number,
+// or that is more cores than the engine limit's whole cores. An empty quota takes
+// the derived default, so it has nothing to check. An empty limit takes
+// DefaultDindCPU: decodeValues validates before withDefaults fills it.
+func validateCPUQuota(quota, limit string) error {
+	if quota == "" {
+		return nil
+	}
+	if !wholeCoresRE.MatchString(quota) {
+		return fmt.Errorf("Values.CPUQuota %q: want a positive whole number of cores, such as 8", quota)
+	}
+	if limit == "" {
+		limit = DefaultDindCPU
+	}
+	whole, err := wholeCPUs(limit)
+	if err != nil {
+		return fmt.Errorf("Values.DindResources.CPU for Values.CPUQuota: %w", err)
+	}
+	cores, err := strconv.Atoi(quota)
+	if err != nil {
+		return fmt.Errorf("Values.CPUQuota %q: want a positive whole number of cores, such as 8", quota)
+	}
+	if cores > whole {
+		return fmt.Errorf("Values.CPUQuota %q is more than the engine limit %q's %d whole cores: want a quota at most that", quota, limit, whole)
 	}
 	return nil
 }
@@ -596,11 +633,16 @@ func validIPv4(s string) bool {
 // encoded from a struct, so every value is quoted as a YAML scalar of its own
 // and a label's text cannot change the document's shape.
 func configYAML(v Values) (string, error) {
-	// The quota is the dind limit's whole cores: the same DindResources.CPU the
-	// engine container renders as its limit, so the two cannot drift (gt-j0i8ap).
-	quota, err := wholeCPUs(v.DindResources.CPU)
-	if err != nil {
-		return "", err
+	// The quota is the dind limit's whole cores unless the caller names one: the
+	// same DindResources.CPU the engine container renders as its limit, so the two
+	// cannot drift (gt-j0i8ap).
+	quota := v.CPUQuota
+	if quota == "" {
+		whole, err := wholeCPUs(v.DindResources.CPU)
+		if err != nil {
+			return "", err
+		}
+		quota = strconv.Itoa(whole)
 	}
 	var b strings.Builder
 	b.WriteString("runner:\n")
@@ -611,7 +653,7 @@ func configYAML(v Values) (string, error) {
 		fmt.Fprintf(&b, "    %s: %s\n", env.Name, yamlScalar(env.Value))
 	}
 	// The gate's cpuquota command reads the cores a job may use (gt-fvi3ny).
-	fmt.Fprintf(&b, "    CI_CPU_QUOTA: %s\n", yamlScalar(strconv.Itoa(quota)))
+	fmt.Fprintf(&b, "    CI_CPU_QUOTA: %s\n", yamlScalar(quota))
 	fmt.Fprintf(&b, "  timeout: %s\n", yamlScalar(RunnerTimeout))
 	fmt.Fprintf(&b, "  shutdown_timeout: %s\n", yamlScalar(ShutdownTimeout))
 	b.WriteString("  labels:\n")

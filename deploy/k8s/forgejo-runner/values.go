@@ -37,6 +37,7 @@ type fileValues struct {
 	RunnerResources Share    `yaml:"runnerResources"`
 	DindResources   Share    `yaml:"dindResources"`
 	DindRequests    Share    `yaml:"dindRequests"`
+	CPUQuota        string   `yaml:"cpuQuota"`
 }
 
 // ControlValues returns the Values the control cluster's runner is built from:
@@ -81,6 +82,7 @@ func decodeValues(file string, data []byte) (Values, error) {
 		RunnerResources: doc.RunnerResources,
 		DindResources:   doc.DindResources,
 		DindRequests:    doc.DindRequests,
+		CPUQuota:        doc.CPUQuota,
 	}
 	if err := v.validate(); err != nil {
 		return Values{}, fmt.Errorf("%s: %w", file, err)
