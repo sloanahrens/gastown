@@ -113,7 +113,7 @@ func TestEvictRunKeepsLiveUse(t *testing.T) {
 func TestEvictRunKeepsEntryUsedDuringEviction(t *testing.T) {
 	t.Parallel()
 	dir := evictRunCache(t)
-	sum, ran, err := evict(dir, 8, filepath.Join(dir, "journal", "own.log"), evictNow, evictBBUsedLater(t, dir))
+	sum, ran, err := evict(dir, 8, filepath.Join(dir, "journal", "own.log"), evictNow, evictBBUsedLater(t, dir), os.Remove)
 	must(t, err)
 	if !ran || sum.EvictedEntries != 0 || sum.EvictedBytes != 0 {
 		t.Fatalf("ran %v, evicted %d entries and %d bytes; want true, 0 and 0", ran, sum.EvictedEntries, sum.EvictedBytes)
@@ -140,7 +140,7 @@ func TestEvictRunEntryWithoutFiles(t *testing.T) {
 			dir := evictRunCache(t)
 			must(t, os.Remove(filepath.Join(dir, "bb", "bb-a")))
 			must(t, os.Remove(filepath.Join(dir, "b1", "b1-d")))
-			sum, ran, err := evict(dir, 8, filepath.Join(dir, "journal", "own.log"), evictNow, c.during(t, dir))
+			sum, ran, err := evict(dir, 8, filepath.Join(dir, "journal", "own.log"), evictNow, c.during(t, dir), os.Remove)
 			must(t, err)
 			if !ran || sum.EvictedEntries != 0 || sum.EvictedBytes != 0 {
 				t.Fatalf("ran %v, evicted %d entries and %d bytes; want true, 0 and 0", ran, sum.EvictedEntries, sum.EvictedBytes)
@@ -194,7 +194,7 @@ func TestEvictRunFailureKeepsJournals(t *testing.T) {
 			if c.during != nil {
 				during = func() { c.during(t, dir) }
 			}
-			_, ran, err := evict(dir, c.maxBytes, filepath.Join(dir, "journal", "own.log"), evictNow, during)
+			_, ran, err := evict(dir, c.maxBytes, filepath.Join(dir, "journal", "own.log"), evictNow, during, os.Remove)
 			if err == nil || ran {
 				t.Errorf("ran %v with err %v, want ran false and an error", ran, err)
 			}
@@ -214,7 +214,7 @@ func TestEvictRunLaterEvictionDropsEntryWithoutFiles(t *testing.T) {
 	own := filepath.Join(dir, "journal", "own.log")
 	// The reread fails after bb's files were moved aside, so bb is left with no files.
 	bad := func() { writeDiskFile(t, filepath.Join(dir, "journal", "bad.log"), []byte("junk\n")) }
-	if _, ran, err := evict(dir, 8, own, evictNow, bad); err == nil || ran {
+	if _, ran, err := evict(dir, 8, own, evictNow, bad, os.Remove); err == nil || ran {
 		t.Fatalf("failing eviction ran %v with err %v, want ran false and an error", ran, err)
 	}
 	must(t, os.Remove(filepath.Join(dir, "journal", "bad.log")))
@@ -270,4 +270,105 @@ func TestEvictRunJournalRemovalErrorKeepsSnapshot(t *testing.T) {
 		t.Fatalf("ran %v, evicted %d entries and %d bytes, err %v; want ran true, 1 entry, 4 bytes and an error", ran, sum.EvictedEntries, sum.EvictedBytes, err)
 	}
 	evictSnapshotAAandCC(t, dir)
+}
+
+var errLeftover = errors.New("leftover test failure")
+
+func TestEvictLeftoverRemovesLeftoversInShards(t *testing.T) {
+	t.Parallel()
+	dir := evictRunCache(t)
+	leftovers := []string{"aa/aa-a.evicting", "bb/bb-d.evicting"}
+	for _, rel := range leftovers {
+		writeDiskFile(t, filepath.Join(dir, rel), []byte("left"))
+	}
+	writeDiskFile(t, filepath.Join(dir, "aa", "aa-x"), []byte("x"))
+	_, _, err := Evict(dir, 8, filepath.Join(dir, "journal", "own.log"), evictNow)
+	must(t, err)
+	for _, rel := range leftovers {
+		if exists(t, filepath.Join(dir, rel)) {
+			t.Errorf("leftover %s was not removed", rel)
+		}
+	}
+	if !exists(t, filepath.Join(dir, "aa", "aa-x")) {
+		t.Error("aa-x, which is not a leftover, was removed")
+	}
+}
+
+func TestEvictLeftoverRefusedGateKeepsFiles(t *testing.T) {
+	t.Parallel()
+	dir := evictRunCache(t)
+	leftover := filepath.Join(dir, "aa", "aa-a.evicting")
+	writeDiskFile(t, leftover, []byte("left"))
+	// A snapshot written at evictNow refuses an eviction at evictNow.
+	must(t, os.Chtimes(filepath.Join(dir, "index.jsonl"), evictNow, evictNow))
+	_, ran, err := Evict(dir, 8, filepath.Join(dir, "journal", "own.log"), evictNow)
+	if err != nil || ran || !exists(t, leftover) {
+		t.Errorf("refused eviction ran %v with err %v, or removed the leftover", ran, err)
+	}
+}
+
+func TestEvictLeftoverSelectsRegularFilesInShards(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	want := map[string]bool{"aa/aa-a.evicting": true, "bb/bb-d.evicting": true, "aa/aa-x": false, "cc/cc-a": false, "abc/abc-a.evicting": false, "index.jsonl.evicting": false}
+	for rel := range want {
+		writeDiskFile(t, filepath.Join(dir, rel), []byte("x"))
+	}
+	// An empty directory: os.Remove would delete it, so only the regular-file check keeps it.
+	must(t, os.MkdirAll(filepath.Join(dir, "dd", "dd-a.evicting"), 0o755))
+	want["dd/dd-a.evicting"] = false
+	must(t, removeLeftovers(dir, os.ReadDir, os.Remove))
+	for rel, removed := range want {
+		if exists(t, filepath.Join(dir, rel)) == removed {
+			t.Errorf("%s: removed %v, want %v", rel, !removed, removed)
+		}
+	}
+}
+
+func TestEvictLeftoverGoneIsNoError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeDiskFile(t, filepath.Join(dir, "aa", "aa-a.evicting"), []byte("x"))
+	gone := func(path string) error {
+		must(t, os.Remove(path))
+		return os.Remove(path)
+	}
+	if err := removeLeftovers(dir, os.ReadDir, gone); err != nil {
+		t.Errorf("removeLeftovers with a leftover already gone: %v, want nil", err)
+	}
+}
+
+func TestEvictLeftoverListingFailure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	leftover := filepath.Join(dir, "aa", "aa-a.evicting")
+	writeDiskFile(t, leftover, []byte("x"))
+	for _, failAt := range []string{dir, filepath.Join(dir, "aa")} {
+		read := func(path string) ([]os.DirEntry, error) {
+			if path == failAt {
+				return nil, errLeftover
+			}
+			return os.ReadDir(path)
+		}
+		if err := removeLeftovers(dir, read, os.Remove); !errors.Is(err, errLeftover) || !exists(t, leftover) {
+			t.Errorf("listing %s fails: err %v, want the listing error and the leftover kept", failAt, err)
+		}
+	}
+}
+
+func TestEvictLeftoverRemoveFailureKeepsJournals(t *testing.T) {
+	t.Parallel()
+	dir := evictRunCache(t)
+	writeDiskFile(t, filepath.Join(dir, "aa", "aa-a.evicting"), []byte("x"))
+	failing := func(string) error { return errLeftover }
+	_, ran, err := evict(dir, 8, filepath.Join(dir, "journal", "own.log"), evictNow, nil, failing)
+	if !errors.Is(err, errLeftover) || ran {
+		t.Fatalf("ran %v with err %v, want ran false and the removal error", ran, err)
+	}
+	for _, rel := range []string{"journal/dead.log", "journal/own.log"} {
+		if !exists(t, filepath.Join(dir, rel)) {
+			t.Errorf("%s was removed by a failed eviction", rel)
+		}
+	}
+	evictUsable(t, dir)
 }

@@ -14,17 +14,20 @@ import (
 // is true once the snapshot is written: an earlier failure keeps every journal and returns ran
 // false; a failed journal removal after it returns the summary, ran true and the error.
 func Evict(dir string, maxBytes int64, ownJournal string, now time.Time) (Summary, bool, error) {
-	return evict(dir, maxBytes, ownJournal, now, nil)
+	return evict(dir, maxBytes, ownJournal, now, nil, os.Remove)
 }
 
 // evict is Evict; beforeEvict, when set, runs before any chosen file moves, so a test can stand
 // in for a process that writes during the eviction.
-func evict(dir string, maxBytes int64, ownJournal string, now time.Time, beforeEvict func()) (Summary, bool, error) {
+func evict(dir string, maxBytes int64, ownJournal string, now time.Time, beforeEvict func(), remove func(string) error) (Summary, bool, error) {
 	release, run, err := evictGate(dir, now)
 	if err != nil || !run {
 		return Summary{}, false, err
 	}
 	defer release()
+	if err := removeLeftovers(dir, os.ReadDir, remove); err != nil {
+		return Summary{}, false, err
+	}
 
 	indexPath := filepath.Join(dir, "index.jsonl")
 	snapshot, err := ReadSnapshot(indexPath)
@@ -87,4 +90,34 @@ func evict(dir string, maxBytes int64, ownJournal string, now time.Time, beforeE
 		}
 	}
 	return plan, true, errors.Join(errs...)
+}
+
+// removeLeftovers deletes the regular .evicting files in dir's two-character shard directories, the
+// leftovers of a failed eviction. It runs under the gate, so none is in progress. A file already gone
+// is not an error; a listing or removal failure is returned.
+func removeLeftovers(dir string, readDir func(string) ([]fs.DirEntry, error), remove func(string) error) error {
+	shards, err := readDir(dir)
+	if err != nil {
+		return fmt.Errorf("gocacheprog: evict: list %s: %w", dir, err)
+	}
+	for _, shard := range shards {
+		if !shard.IsDir() || len(shard.Name()) != 2 {
+			continue
+		}
+		shardDir := filepath.Join(dir, shard.Name())
+		files, err := readDir(shardDir)
+		if err != nil {
+			return fmt.Errorf("gocacheprog: evict: list %s: %w", shardDir, err)
+		}
+		for _, f := range files {
+			if !f.Type().IsRegular() || filepath.Ext(f.Name()) != evictSuffix {
+				continue
+			}
+			path := filepath.Join(shardDir, f.Name())
+			if err := remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("gocacheprog: evict: remove leftover %s: %w", path, err)
+			}
+		}
+	}
+	return nil
 }
