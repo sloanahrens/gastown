@@ -1,6 +1,7 @@
 // Command gt-gocacheprog is the cache program a Go build's -cacheprog runs.
-// It opens the disk store under -dir and answers the go command's requests on
-// stdin and stdout (gt-dpjby4).
+// It opens the disk store under -dir, answers the go command's requests on
+// stdin and stdout, and appends the serving run's counts to <dir>/stats.jsonl
+// (gt-dpjby4, gt-l4bzgs).
 package main
 
 import (
@@ -17,13 +18,15 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, writableCheck))
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, writableCheck, time.Now))
 }
 
 // run opens the store under -dir, probes it for writability and serves the
-// requests on stdin. It returns 0, or names the failing step in one stderr
-// line and returns 1 (gt-6i1x13, gt-dpjby4).
-func run(args []string, stdin io.Reader, stdout, stderr io.Writer, check func(dir string) error) int {
+// requests on stdin, then appends the run's counts to <dir>/stats.jsonl. It
+// returns 0, or names the failing step in one stderr line and returns 1
+// (gt-6i1x13, gt-dpjby4). A stats line that cannot be written is reported in
+// one stderr line and leaves the exit status to the session (gt-l4bzgs).
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer, check func(dir string) error, now func() time.Time) int {
 	fs := flag.NewFlagSet("gt-gocacheprog", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	dir := fs.String("dir", "", "directory of the cache store (required, absolute)")
@@ -43,10 +46,48 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, check func(di
 	if err := check(*dir); err != nil {
 		return fail(stderr, "writable", err)
 	}
-	if _, err := gocacheprog.Serve(context.Background(), stdin, stdout, store); err != nil {
-		return fail(stderr, "serve", err)
+	start := now()
+	stats, serveErr := gocacheprog.Serve(context.Background(), stdin, stdout, store)
+	if err := appendStats(*dir, stats, start, now, openStats); err != nil {
+		fmt.Fprintf(stderr, "gt-gocacheprog: stats: %v\n", err)
+	}
+	if serveErr != nil {
+		return fail(stderr, "serve", serveErr)
 	}
 	return 0
+}
+
+// statsFileName is the file each run appends its counts to (gt-l4bzgs).
+const statsFileName = "stats.jsonl"
+
+// appendStats appends one line of counts to dir/stats.jsonl, timed from start
+// to now. open is a seam, as probeWritable's are, so a test drives an open,
+// write or close failure in process. The line goes to a file opened for append
+// in one write, so processes sharing the directory do not interleave. Its
+// fields are integers and a UTC RFC 3339 time, which %q quotes as JSON does
+// (gt-l4bzgs).
+func appendStats(dir string, stats gocacheprog.Stats, start time.Time, now func() time.Time, open func(string) (io.WriteCloser, error)) error {
+	line := fmt.Sprintf(`{"gets":%d,"hits":%d,"misses":%d,"puts":%d,"put_bytes":%d,"hit_bytes":%d,"errors":%d,"start":%q,"elapsed_ms":%d}`+"\n",
+		stats.Gets, stats.Hits, stats.Misses, stats.Puts, stats.PutBytes, stats.HitBytes,
+		stats.Errors, start.UTC().Format(time.RFC3339), now().Sub(start).Milliseconds())
+	f, err := open(filepath.Join(dir, statsFileName))
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write([]byte(line))
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	return werr
+}
+
+// openStats opens path for append, creating it: appendStats's production seam.
+func openStats(path string) (io.WriteCloser, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644) //nolint:gosec // G302: counts, not secrets, and the reader may be another user
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
 }
 
 // writableCheck is the seam main and the tests pass run (gt-6i1x13).
