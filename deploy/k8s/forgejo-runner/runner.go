@@ -44,9 +44,10 @@ const (
 	DindTag = "dind"
 	// DindImage is the docker-in-docker sidecar's image.
 	DindImage = dindRepository + ":" + DindTag
-	// Name is the name of the Deployment and the stem of the claims' and the
-	// ConfigMap's names.
+	// Name is the stem of every object's name when Values.Name is empty.
 	Name = "forgejo-runner"
+	// maxNameLength is the longest Values.Name the renderer accepts (gt-6mlp5w).
+	maxNameLength = 57
 	// DefaultNamespace is the namespace the objects land in when Values names none.
 	DefaultNamespace = "forgejo"
 	// PriorityClassName is the class the pod runs at, defined in
@@ -197,6 +198,8 @@ type Share struct {
 // a runner with no label takes no job, and a pod that cannot resolve forgejo
 // cannot register.
 type Values struct {
+	// Name is the stem of every object's name, label and selector; the constant Name when empty.
+	Name string
 	// Namespace is the namespace every object lands in; DefaultNamespace when empty.
 	Namespace string
 	// Labels are the runner's labels, each "name:docker://image".
@@ -249,25 +252,25 @@ func Build(v Values) (Manifests, error) {
 	shareProcessNamespace := true
 
 	return Manifests{
-		DindClaim:   claim(Name+"-dind", namespace, v.DindStorage),
-		RunnerClaim: claim(Name+"-data", namespace, v.RunnerStorage),
+		DindClaim:   claim(v.Name+"-dind", namespace, v.Name, v.DindStorage),
+		RunnerClaim: claim(v.Name+"-data", namespace, v.Name, v.RunnerStorage),
 		ConfigMap: ConfigMap{
 			TypeMeta: TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
-			Metadata: objectMeta(Name+"-config", namespace),
+			Metadata: objectMeta(v.Name+"-config", namespace, v.Name),
 			Data:     map[string]string{configKey: config},
 		},
 		Deployment: Deployment{
 			TypeMeta: TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
-			Metadata: objectMeta(Name, namespace),
+			Metadata: objectMeta(v.Name, namespace, v.Name),
 			Spec: DeploymentSpec{
 				// One replica: two would share the engine claim, and one
 				// registration file. Recreate, so a rollout never overlaps the
 				// old pod with the new one on either.
 				Replicas: 1,
 				Strategy: DeploymentStrategy{Type: Recreate},
-				Selector: LabelSelector{MatchLabels: selectorLabels()},
+				Selector: LabelSelector{MatchLabels: selectorLabels(v.Name)},
 				Template: PodTemplate{
-					Metadata: TemplateMeta{Labels: labels()},
+					Metadata: TemplateMeta{Labels: labels(v.Name)},
 					Spec: PodSpec{
 						PriorityClassName:             PriorityClassName,
 						TerminationGracePeriodSeconds: TerminationGrace,
@@ -279,13 +282,13 @@ func Build(v Values) (Manifests, error) {
 						InitContainers:        []Container{dindContainer(v)},
 						Containers:            []Container{runnerContainer(v)},
 						Volumes: []Volume{
-							{Name: configVolume, ConfigMap: &ConfigMapVolumeSource{Name: Name + "-config"}},
+							{Name: configVolume, ConfigMap: &ConfigMapVolumeSource{Name: v.Name + "-config"}},
 							// The engine writes its TLS material here and the runner
 							// reads the client half; both die with the pod, so the
 							// certificates are never committed.
 							{Name: certsVolume, EmptyDir: &EmptyDirVolumeSource{}},
-							{Name: runnerDataVolume, PersistentVolumeClaim: &PersistentVolumeClaimRef{ClaimName: Name + "-data"}},
-							{Name: dindDataVolume, PersistentVolumeClaim: &PersistentVolumeClaimRef{ClaimName: Name + "-dind"}},
+							{Name: runnerDataVolume, PersistentVolumeClaim: &PersistentVolumeClaimRef{ClaimName: v.Name + "-data"}},
+							{Name: dindDataVolume, PersistentVolumeClaim: &PersistentVolumeClaimRef{ClaimName: v.Name + "-dind"}},
 						},
 					},
 				},
@@ -294,11 +297,11 @@ func Build(v Values) (Manifests, error) {
 	}, nil
 }
 
-// claim is a ReadWriteOnce claim of size, named name in namespace.
-func claim(name, namespace, size string) PersistentVolumeClaim {
+// claim is a ReadWriteOnce claim of size, named name in namespace and labeled with stem.
+func claim(name, namespace, stem, size string) PersistentVolumeClaim {
 	return PersistentVolumeClaim{
 		TypeMeta: TypeMeta{APIVersion: "v1", Kind: "PersistentVolumeClaim"},
-		Metadata: objectMeta(name, namespace),
+		Metadata: objectMeta(name, namespace, stem),
 		Spec: PVCSpec{
 			AccessModes: []string{"ReadWriteOnce"},
 			Resources:   ResourceRequirements{Requests: map[string]string{"storage": size}},
@@ -383,27 +386,30 @@ func containerResources(limits, requests Share) ContainerResources {
 	return ContainerResources{Requests: request, Limits: limit}
 }
 
-// objectMeta is the metadata every object carries. Each call builds its own
-// label map, so editing one object's labels leaves the others alone.
-func objectMeta(name, namespace string) ObjectMeta {
-	return ObjectMeta{Name: name, Namespace: namespace, Labels: labels()}
+// objectMeta is the metadata every object carries, named name and labeled with the
+// runner's stem. Each call builds its own map, so editing one leaves the others.
+func objectMeta(name, namespace, stem string) ObjectMeta {
+	return ObjectMeta{Name: name, Namespace: namespace, Labels: labels(stem)}
 }
 
 // labels are on every object; selectorLabels is the subset a selector matches.
-func labels() map[string]string {
+func labels(stem string) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":       Name,
+		"app.kubernetes.io/name":       stem,
 		"app.kubernetes.io/managed-by": "gt",
 	}
 }
 
 // selectorLabels are what the Deployment selects its pods by, so they carry only
-// the name.
-func selectorLabels() map[string]string {
-	return map[string]string{"app.kubernetes.io/name": Name}
+// the stem.
+func selectorLabels(stem string) map[string]string {
+	return map[string]string{"app.kubernetes.io/name": stem}
 }
 
 func (v Values) withDefaults() Values {
+	if v.Name == "" {
+		v.Name = Name
+	}
 	if v.Capacity == 0 {
 		v.Capacity = DefaultCapacity
 	}
@@ -429,6 +435,11 @@ func (v Values) withDefaults() Values {
 }
 
 func (v Values) validate() error {
+	// Every object name and the name label derive from the stem. An empty stem is
+	// left alone: withDefaults fills it with the constant before Build renders.
+	if v.Name != "" && (!validDNS1123Label(v.Name) || len(v.Name) > maxNameLength) {
+		return fmt.Errorf("Values.Name %q: want a DNS-1123 label of at most %d characters", v.Name, maxNameLength)
+	}
 	if v.Namespace != "" && !validDNS1123Label(v.Namespace) {
 		return fmt.Errorf("the namespace %q: want a DNS-1123 label of at most 63 characters", v.Namespace)
 	}
