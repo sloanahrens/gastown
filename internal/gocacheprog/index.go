@@ -17,10 +17,15 @@ type IndexEntry struct {
 // Index maps an action id to its entry.
 type Index map[string]IndexEntry
 
-// Merge returns idx with records applied, leaving idx unchanged. Puts apply before
-// uses, so a use of an action put in the same call is kept; a use of an action the
-// index still lacks is ignored. Within one call the order of records does not matter,
-// and merging the same records again changes nothing.
+// Merge returns idx with records applied, leaving idx unchanged. All puts apply
+// before all uses, so within one call record order and repetition do not matter:
+// a use of an action put in the same call is kept, and merging the same records
+// again changes nothing.
+//
+// A use of an action held neither by idx nor by a put of this call is ignored and
+// not remembered, so a put in a later call carries its own time as last use. An
+// entry never exists without a size, so a caller passes every record it holds in
+// one call.
 func Merge(idx Index, records []Record) Index {
 	out := make(Index, len(idx))
 	maps.Copy(out, idx)
@@ -37,6 +42,7 @@ func Merge(idx Index, records []Record) Index {
 		}
 		out[r.ActionID] = e
 	}
+	// A use of an unknown action is dropped: an entry never exists without a size.
 	for _, r := range records {
 		if e, ok := out[r.ActionID]; ok && r.Op == opUse && r.Time.After(e.LastUse) {
 			e.LastUse = r.Time

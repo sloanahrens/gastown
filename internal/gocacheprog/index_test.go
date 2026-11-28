@@ -65,6 +65,18 @@ func TestIndexMergeIsOrderFreeAndIdempotent(t *testing.T) {
 	if split := Merge(Merge(nil, append(slices.Clone(records[:3]), records[4:]...)), records[3:4]); !sameIndex(split, want) {
 		t.Errorf("puts then use: index = %+v, want %+v", split, want)
 	}
+
+	// A use merged in an earlier call than its put is dropped, since an entry never
+	// exists without a size. The same two records in one call keep the use as last use.
+	useBeforePut := []Record{indexUse("d", 5), indexPut("d", "w", 2, 1)}
+	splitWant := Index{"d": indexEntry("w", 2, 1, 1)}
+	if got := Merge(Merge(nil, useBeforePut[:1]), useBeforePut[1:]); !sameIndex(got, splitWant) {
+		t.Errorf("use merged before its put: index = %+v, want %+v", got, splitWant)
+	}
+	oneCallWant := Index{"d": indexEntry("w", 2, 1, 5)}
+	if got := Merge(nil, useBeforePut); !sameIndex(got, oneCallWant) {
+		t.Errorf("use and put in one call: index = %+v, want %+v", got, oneCallWant)
+	}
 }
 
 func TestIndexUseRaisesLastUseWithoutLoweringIt(t *testing.T) {
