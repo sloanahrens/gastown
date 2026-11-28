@@ -26,6 +26,8 @@ func TestRedBaseReportLines(t *testing.T) {
 			"x_test.go:3: TestB passes without the change\nx_test.go:7: TestA passes without the change\nredbase: 3 new or changed test(s) in 2 package(s), 2 passing without the change\n", false},
 		{"no findings is ok with the count line, and a package with no test counts in neither total", plan(pkg("a"), pkg("b", rt("TestA", 3))),
 			nil, "redbase: 1 new or changed test(s) in 1 package(s), 0 passing without the change\n", true},
+		{"a tests-and-docs plan prints the not-judged line before the count and stays ok", RedBasePlanResult{OnlyTestsAndDocs: true},
+			nil, "redbase: not judged: the change touches only tests and docs\nredbase: 0 new or changed test(s) in 0 package(s), 0 passing without the change\n", true},
 		{"an empty plan is ok and counts zero", plan(), nil,
 			"redbase: 0 new or changed test(s) in 0 package(s), 0 passing without the change\n", true},
 	} {
@@ -48,6 +50,7 @@ func TestRedBaseReportWriteError(t *testing.T) {
 		findings []RedBaseFinding
 	}{
 		{"a failed not-judged line is returned", RedBasePlanResult{NotJudged: []string{"x_test.go"}}, nil},
+		{"a failed tests-and-docs line is returned", RedBasePlanResult{OnlyTestsAndDocs: true}, nil},
 		{"a failed finding line is returned", RedBasePlanResult{}, []RedBaseFinding{{Test: RedBaseTest{Name: "TestA", File: "x_test.go", Line: 1}}}},
 		{"a failed count line is returned", RedBasePlanResult{}, nil},
 	} {

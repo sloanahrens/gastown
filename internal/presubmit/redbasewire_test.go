@@ -81,6 +81,14 @@ func TestRedBaseRunCheck(t *testing.T) {
 			git:     wireGit{planGit: planGit{fakeGit: fakeGit{diffErr: boom}}},
 			wantErr: "boom",
 		},
+		{
+			name:       "a tests-and-docs change makes no tree and is ok",
+			git:        wireGit{planGit: planGit{only: "pkg/a_test.go\x00docs/x.md\x00"}},
+			wantOK:     true,
+			wantReport: "redbase: not judged: the change touches only tests and docs\nredbase: 0 new or changed test(s) in 0 package(s), 0 passing without the change\n",
+			wantRuns:   0,
+			wantRemove: 0,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
