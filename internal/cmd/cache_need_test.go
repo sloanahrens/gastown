@@ -205,8 +205,15 @@ func TestCacheNeedRejectsBadFlags(t *testing.T) {
 
 func TestCacheNeedRealDepsLedgerError(t *testing.T) {
 	t.Parallel()
-	if _, _, err := cacheNeedRealDeps().tail("", "sweep_cache_trim", 1); err == nil {
-		t.Error("an empty town root read a ledger, want the NewLedger error")
+	for _, tc := range []struct{ name, townRoot, job string }{
+		{"empty town root", "", "sweep_cache_trim"},
+		{"empty job name", t.TempDir(), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := cacheNeedRealDeps().tail(tc.townRoot, tc.job, 1); err == nil {
+				t.Error("the real read returned no error, want the ledger error")
+			}
+		})
 	}
 }
 
