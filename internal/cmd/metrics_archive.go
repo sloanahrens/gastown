@@ -78,16 +78,14 @@ func archiveSampledCommits(ctx context.Context, run metrics.Runner, repo, rig st
 	return sampled, nil
 }
 
-// archiveFirstFiled reads each sampled commit's issues.jsonl and returns the
-// first row the archive holds per bead. A commit whose file cannot be read
-// fails the run: a silently skipped day is a bead read from a later edit
+// archiveFirstFiled reads each sampled commit's whole issues export and returns
+// the first row the archive holds per bead. A commit whose export cannot be
+// read fails the run: a silently skipped day is a bead read from a later edit
 // without any sign of it.
 func archiveFirstFiled(ctx context.Context, run metrics.Runner, repo, rig string, commits []archiveCommit, dropped *metrics.Dropped) ([]metrics.FirstFiled, error) {
 	batches := make([]metrics.ArchiveCommit, 0, len(commits))
 	for _, c := range commits {
-		data, err := run(ctx, []string{
-			"git", "-C", repo, "show", c.SHA + ":" + rig + "/issues.jsonl",
-		})
+		data, err := archiveIssuesAt(ctx, run, repo, rig, c.SHA)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s/issues.jsonl at %s: %w", rig, c.SHA, err)
 		}

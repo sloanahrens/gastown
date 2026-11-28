@@ -278,7 +278,7 @@ func TestMetricsShapeOutcomeRefusesWhatItCannotRead(t *testing.T) {
 			name: "an event shard cannot be read",
 			env: func(t *testing.T) shapeArchiveEnv {
 				return shapeArchiveEnv{Town: shapeTown(t), Rig: "gt", ReadFile: os.ReadFile,
-					Run: archive("show HEAD:gt/events.jsonl", []byte("gt/events.jsonl\n"))}
+					Run: archive("show HEAD:gt/events.jsonl", []byte("gt/events.jsonl\ngt/issues.jsonl\n"))}
 			},
 			want: "at HEAD",
 		},
@@ -295,7 +295,7 @@ func TestMetricsShapeOutcomeRefusesWhatItCannotRead(t *testing.T) {
 			env: func(t *testing.T) shapeArchiveEnv {
 				town := t.TempDir()
 				return shapeArchiveEnv{Town: town, Rig: "gt", ReadFile: os.ReadFile,
-					Run: archive("", []byte("gt/events.jsonl\n"))}
+					Run: archive("", []byte("gt/events.jsonl\ngt/issues.jsonl\n"))}
 			},
 			want: "review log",
 		},

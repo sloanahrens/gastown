@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +55,11 @@ const importVersionsLateFiledIssues = importVersionsIssues +
 // importVersionsRunner is the archive's 15-minute export as the fake git
 // answers it: one commit holding issues, and the commit's issues.jsonl.
 func importVersionsRunner(issues string, failOn string) metrics.Runner {
+	return importVersionsShardRunner(map[string]string{"gt/issues.jsonl": issues}, failOn)
+}
+
+// importVersionsShardRunner is importVersionsRunner for a rig split into shards.
+func importVersionsShardRunner(shards map[string]string, failOn string) metrics.Runner {
 	return func(_ context.Context, argv []string) ([]byte, error) {
 		joined := strings.Join(argv, " ")
 		if failOn != "" && strings.Contains(joined, failOn) {
@@ -61,11 +68,22 @@ func importVersionsRunner(issues string, failOn string) metrics.Runner {
 		switch {
 		case strings.Contains(joined, " log "):
 			return []byte(importVersionsSHA + " 2026-09-10T23:00:00Z\n"), nil
-		case strings.Contains(joined, " show ") && strings.Contains(joined, ":gt/issues.jsonl"):
-			return []byte(issues), nil
-		default:
-			return nil, fmt.Errorf("unexpected argv %v", argv)
+		case strings.Contains(joined, " ls-tree "):
+			return []byte(strings.Join(slices.Sorted(maps.Keys(shards)), "\n") + "\n"), nil
+		case strings.Contains(joined, " show "):
+			if data, ok := shards[strings.TrimPrefix(argv[len(argv)-1], importVersionsSHA+":")]; ok {
+				return []byte(data), nil
+			}
 		}
+		return nil, fmt.Errorf("unexpected argv %v", argv)
+	}
+}
+
+// importVersionsTwoShards puts gt-a in the first shard and gt-b in the second.
+func importVersionsTwoShards() map[string]string {
+	return map[string]string{
+		"gt/issues.jsonl":   importVersionsIssues,
+		"gt/issues.2.jsonl": strings.TrimPrefix(importVersionsTwoIssues, importVersionsIssues),
 	}
 }
 
@@ -200,6 +218,20 @@ func TestMetricsImportVersionsWritesTheGivenPath(t *testing.T) {
 	}
 }
 
+// TestMetricsImportVersionsReadsEveryIssuesShard records a bead from the second shard.
+func TestMetricsImportVersionsReadsEveryIssuesShard(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "store.jsonl")
+	env := importVersionsEnv{Town: t.TempDir(), Rig: "gt", Path: path, Run: importVersionsShardRunner(importVersionsTwoShards(), "")}
+
+	if err := runMetricsImportVersions(context.Background(), io.Discard, env); err != nil {
+		t.Fatalf("runMetricsImportVersions: %v", err)
+	}
+	if _, ok := importVersionsBeads(t, path)["gt-b"]; !ok {
+		t.Errorf("no version for gt-b: the second shard was not read")
+	}
+}
+
 // TestMetricsImportVersionsLeavesOutABeadEditedAfterCreation drives the
 // import's proof: a bead written again after its created_at may not hold its
 // filed text, so it is not recorded and the receipt counts it.
@@ -317,6 +349,13 @@ func TestMetricsImportVersionsRefusesWhatItCannotRead(t *testing.T) {
 				return importVersionsEnv{Town: t.TempDir(), Rig: "gt", Run: importVersionsRunner(importVersionsIssues, "show "+importVersionsSHA)}
 			},
 			want: "issues.jsonl at",
+		},
+		{
+			name: "a shard of a sampled commit cannot be read",
+			env: func(t *testing.T) importVersionsEnv {
+				return importVersionsEnv{Town: t.TempDir(), Rig: "gt", Run: importVersionsShardRunner(importVersionsTwoShards(), "show "+importVersionsSHA+":gt/issues.2.jsonl")}
+			},
+			want: "gt/issues.2.jsonl at",
 		},
 		{
 			name: "the store cannot be read",
