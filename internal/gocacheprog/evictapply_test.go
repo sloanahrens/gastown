@@ -131,6 +131,32 @@ func TestEvictApplyFailures(t *testing.T) {
 				return nil, nil, nil
 			}},
 		{name: "id is not hex", actions: idsOf("zz"), outputs: idsOf("bb"), kept: []string{"bb/bb-d"}},
+		{name: "body rename fails", actions: idsOf("aa"), outputs: idsOf("bb"), kept: []string{"aa/aa-a.evicting"},
+			setup: func(t *testing.T, dir string) { nonEmptyDir(t, filepath.Join(dir, "bb", "bb-d.evicting")) },
+			reread: func(t *testing.T, _ string) ([][]byte, [][]byte, error) {
+				t.Error("reread ran after a failed rename")
+				return nil, nil, nil
+			}},
+		{name: "action delete fails", actions: idsOf("aa"), outputs: idsOf("bb"), kept: []string{"bb/bb-d.evicting"},
+			reread: func(t *testing.T, dir string) ([][]byte, [][]byte, error) {
+				must(t, os.Remove(filepath.Join(dir, "aa", "aa-a.evicting")))
+				nonEmptyDir(t, filepath.Join(dir, "aa", "aa-a.evicting"))
+				return nil, nil, nil
+			}},
+		{name: "body restore fails", actions: idsOf("aa"), outputs: idsOf("bb"), kept: []string{"aa/aa-a.evicting", "bb/bb-d.evicting"},
+			reread: func(t *testing.T, dir string) ([][]byte, [][]byte, error) {
+				must(t, os.Remove(filepath.Join(dir, "bb", "bb-d.evicting")))
+				nonEmptyDir(t, filepath.Join(dir, "bb", "bb-d.evicting"))
+				return nil, idsOf("bb"), nil
+			}},
+		{name: "evicted copy cannot be removed", actions: idsOf("aa"), kept: []string{"aa/aa-a.evicting"},
+			reread: func(t *testing.T, dir string) ([][]byte, [][]byte, error) {
+				// A newer index holds the name, so link refuses; the evicted copy is then a non-empty directory.
+				must(t, os.Remove(filepath.Join(dir, "aa", "aa-a.evicting")))
+				nonEmptyDir(t, filepath.Join(dir, "aa", "aa-a.evicting"))
+				writeDiskFile(t, filepath.Join(dir, "aa", "aa-a"), []byte("newer"))
+				return idsOf("aa"), nil, nil
+			}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
