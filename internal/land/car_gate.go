@@ -43,6 +43,11 @@ func (l *Lander) gateCar(ctx context.Context, c *car, r reviewed) (gated, error)
 		// discarded if the gate ends the landing.
 		candRes *CandidateResult
 	)
+	// The candidate is announced just before its gate runs, so the hook sees
+	// the commit being gated ahead of the verdict (gt-49dh3n).
+	if l.CandidateBuilt != nil {
+		l.CandidateBuilt(w, merged)
+	}
 	run, ciVerdict, err := l.candidateGate(gateCtx, wt, dir, w, merged)
 	candRes, gateRes, gateErr = &run, ciVerdict, err
 	ciContext = ciGateContext(gateRes)
