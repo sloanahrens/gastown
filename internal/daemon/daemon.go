@@ -67,6 +67,7 @@ import (
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/townconfig"
+	"github.com/steveyegge/gastown/internal/townflight"
 	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/util"
@@ -2275,6 +2276,17 @@ func acquireDaemonLock(clk clockwork.Clock, lockPath string, budget, poll time.D
 	}
 }
 
+// clearDrainMarker removes the drain marker a previous daemon left in the town.
+// The marker makes townflight refuse every listed command, so a marker that
+// cannot be removed ends the start: a daemon that runs past it would leave the
+// town refusing commands with no daemon draining (gt-niaopb).
+func (d *Daemon) clearDrainMarker() error {
+	if err := townflight.ClearDrain(d.config.TownRoot); err != nil {
+		return fmt.Errorf("clearing the drain marker a previous daemon left: %w", err)
+	}
+	return nil
+}
+
 // startSandboxSamplerTicker starts the sandbox_sampler patrol's own ticker
 // when the patrol is active, and returns a nil channel and stop func when it is
 // not: the seat rows are a 60 s series and the heartbeat is minutes apart
@@ -2371,6 +2383,12 @@ func (d *Daemon) Run() (err error) {
 		return err
 	}
 	defer func() { _ = fileLock.Unlock() }()
+
+	// A drain marker a predecessor left refuses every listed command, so the
+	// start clears it before anything is dispatched (gt-niaopb).
+	if err := d.clearDrainMarker(); err != nil {
+		return err
+	}
 
 	// Pre-flight check: all rigs must be on Dolt backend.
 	if err := d.checkAllRigsDolt(); err != nil {
