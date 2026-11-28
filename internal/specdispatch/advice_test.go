@@ -1,6 +1,8 @@
 package specdispatch
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -379,5 +381,56 @@ func TestAdviceLintBoxNoBoxesSilent(t *testing.T) {
 	s := adviceSpec("Add a column to the board.", "Go.", "")
 	if got := Advice(s); len(got) != 0 {
 		t.Fatalf("Advice() = %q, want none", got)
+	}
+}
+
+// newFileShapeSpec is a bead with the Goal and Size text given.
+func newFileShapeSpec(goal, size string) Spec {
+	return Spec{
+		ID: "gt-newfile", Type: "task", Title: "new file shape fixture",
+		Description: "## Goal\n" + goal + "\n\n## Constraints\nGo.\n\n## Size\n" + size,
+		Acceptance:  "- [ ] the code compiles",
+	}
+}
+
+// newFileShapeLine is the new-file advisory naming n declared lines.
+func newFileShapeLine(n int) string {
+	return fmt.Sprintf("the Change line declares %d added lines; beads that create a code file with its test landed three in four at or under 200: count the test file too (fakes, helpers and rows); gt done measures every added line", n)
+}
+
+// TestAdviceNewFileShapeFires pins the advisory: a bead creating a non-test Go
+// file, naming its test and declaring 105 lines gets exactly one line with that
+// number, beside the lint advice its box already earns.
+func TestAdviceNewFileShapeFires(t *testing.T) {
+	t.Parallel()
+	s := newFileShapeSpec("Create `internal/foo/bar.go` and its test internal/foo/bar_test.go.", "Change: at most 105 added lines in 2 files.")
+	s.Acceptance = "- [ ] lint passes"
+	if got, want := Advice(s), []string{adviceLintLine, newFileShapeLine(105)}; !slices.Equal(got, want) {
+		t.Fatalf("Advice() = %q, want %q", got, want)
+	}
+}
+
+// TestAdviceNewFileShapeSilent pins the cases with no line: 200 declared, only
+// a test file created, another bead's file cited, no Go file created, and no
+// readable Change line or test path.
+func TestAdviceNewFileShapeSilent(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, goal, size string
+	}{
+		{"200 declared", "Create internal/foo/bar.go and its test internal/foo/bar_test.go.", "Change: at most 200 added lines in 2 files."},
+		{"only a test file created", "Create internal/foo/bar_test.go.", "Change: at most 40 added lines."},
+		{"another bead's file cited", "Create internal/foo/bar.go, which is created by bead gt-abc; its test is internal/foo/bar_test.go.", "Change: at most 40 added lines in 2 files."},
+		{"no Go file created", "Update internal/foo/bar.go and its test internal/foo/bar_test.go.", "Change: at most 40 added lines in 2 files."},
+		{"unparsable Change line", "Create internal/foo/bar.go and its test internal/foo/bar_test.go.", "Change: lots of lines."},
+		{"no Change line", "Create internal/foo/bar.go and its test internal/foo/bar_test.go.", "One worker, one landing."},
+		{"no test path", "Create internal/foo/bar.go.", "Change: at most 40 added lines."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := Advice(newFileShapeSpec(tc.goal, tc.size)); len(got) != 0 {
+				t.Fatalf("Advice() = %q, want none", got)
+			}
+		})
 	}
 }

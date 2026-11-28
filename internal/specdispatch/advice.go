@@ -43,6 +43,29 @@ const adviceLintBoxText = "an acceptance box demands that lint passes: a seat ca
 // gt-82g9zr).
 const adviceDeclaredLinesText = "the Change line declares %d added lines; beads estimated at %.1f minutes landed with a median of %d: this is advice, declare the lines you count; gt done refuses past %d added lines"
 
+// newFileShapeLines is the added-line figure a bead that creates a code file
+// with its test should count against. Measured 2026-11-28 from main since
+// 2026-11-15: beads that added a new non-test Go file and test lines landed a
+// median of 127 and a three-in-four figure of 197 added lines (n=288), against
+// 83 and 128 for beads that edited existing code and its test (n=1054); 200 is
+// the round figure over 197.
+const newFileShapeLines = 200
+
+// adviceNewFileShapeText is the sentence for a bead that creates a code file
+// with its test but declares fewer than newFileShapeLines added lines.
+const adviceNewFileShapeText = "the Change line declares %d added lines; beads that create a code file with its test landed three in four at or under %d: count the test file too (fakes, helpers and rows); gt done measures every added line"
+
+// newFileCueRe matches a bead's cue that it creates a Go file ("create
+// internal/foo/bar.go", the path optionally backticked) and captures the path.
+var newFileCueRe = regexp.MustCompile("(?i)\\bcreate\\s+`?([\\w][\\w./-]*\\.go)(?:`|\\b)")
+
+// newFileTestRe matches a _test.go path; newFileCitedRe marks the words right
+// after a cue's path that name another bead's file ("is created by bead").
+var (
+	newFileTestRe  = regexp.MustCompile(`(?i)\b[\w./-]+_test\.go\b`)
+	newFileCitedRe = regexp.MustCompile(`(?i)^[\s,;:.()\[\]-]*(?:which\s+)?is\s+created\s+by\s+bead\b`)
+)
+
 // adviceLintPassRe matches a lint word and a pass word within 40 characters.
 var adviceLintPassRe = regexp.MustCompile(`(?i)\blint\b.{0,40}\bpass(?:es|ed)?\b|\bpass(?:es|ed)?\b.{0,40}\blint\b`)
 
@@ -89,6 +112,10 @@ var otherRigVerbRe = regexp.MustCompile(`(?i)\b(?:read|reads|reading|check|check
 // label as Spec.HasLabel does; the labels are read from ExcludedLabels(), so
 // the advice and the dispatcher cannot disagree on the set.
 //
+// The new-file advisory: a bead whose Goal or Constraints names a non-test Go
+// file to create and a _test.go path, and declares fewer than
+// newFileShapeLines added lines, gets one line saying to count the test file.
+//
 // The other-rig advisory: a Goal or Constraints line that reads something "in
 // the <rig> rig" for another rig gets one line, since the rig's repository is
 // not in this sandbox. With no rig list passed, a line that reads "in the <name>
@@ -105,6 +132,7 @@ func Advice(s Spec) []string {
 		advice = append(advice, adviceLintBoxText)
 	}
 	advice = append(advice, declaredLinesAdvice(s, sections)...)
+	advice = append(advice, newFileLinesAdvice(sections)...)
 	advice = append(advice, otherRigAdvice(s, sections)...)
 	for _, label := range ExcludedLabels() {
 		if s.HasLabel(label) {
@@ -180,6 +208,34 @@ func declaredLinesAdvice(s Spec, sections map[string]string) []string {
 	}
 	return []string{fmt.Sprintf(adviceDeclaredLinesText,
 		budget.Lines, minutes, band.Median, 2*band.Median)}
+}
+
+// newFileLinesAdvice is the new-file advisory: a bead that names a non-test Go
+// file to create, names a _test.go path and declares fewer than
+// newFileShapeLines added lines gets one line.
+func newFileLinesAdvice(sections map[string]string) []string {
+	budget, found, err := ParseChangeBudget(sections["size"])
+	if err != nil || !found || budget.Lines >= newFileShapeLines ||
+		!newFileShape(sections["goal"]+"\n"+sections["constraints"]) {
+		return nil
+	}
+	return []string{fmt.Sprintf(adviceNewFileShapeText, budget.Lines, newFileShapeLines)}
+}
+
+// newFileShape reports whether text names a non-test Go file this bead creates
+// and a _test.go path; a path followed by "is created by bead" is another's.
+func newFileShape(text string) bool {
+	creates := false
+	for _, line := range strings.Split(text, "\n") {
+		for _, m := range newFileCueRe.FindAllStringSubmatchIndex(line, -1) {
+			path := line[m[2]:m[3]]
+			if strings.HasSuffix(path, "_test.go") || newFileCitedRe.MatchString(line[m[1]:]) {
+				continue
+			}
+			creates = true
+		}
+	}
+	return creates && newFileTestRe.MatchString(text)
 }
 
 // otherRigPhrase matches a line that places a read in a rig's repository: "in
