@@ -236,18 +236,26 @@ func TestGetHealthMetrics_Footprint(t *testing.T) {
 	}
 }
 
-// A vmmap that never answers must not hold the status path. The test runs
-// through the real machine's probe deadlines (std.probeTimeout), so the hung
-// probe gives up at the footprint deadline, not the default every other probe
-// keeps: the footprint reads as unavailable and GetHealthMetrics still returns.
-// The test waits the real footprint deadline, so it costs about 2s.
+// A vmmap that never answers must not hold the status path. The test injects
+// a short deadline for vmmap through probeTimeout and records that vmmap was
+// asked for one. GetHealthMetrics returns while the vmmap command is still
+// hung (the release channel closes only after the call), which only the
+// deadline allows; the footprint reads as unavailable. No clock is read, and
+// awaitHung proves the hang was reached.
 func TestGetHealthMetrics_HungVMMapReadsAsUnavailable(t *testing.T) {
 	t.Parallel()
 	const port = 4600
 	f := newFakeHost().townPort(port).on("dolt *", fakeReply{})
 	h := f.host()
 	h.goos = func() string { return "darwin" }
-	h.probeTimeout = std.probeTimeout
+	vmmapAsked := false
+	h.probeTimeout = func(argv []string) time.Duration {
+		if argv[0] != "vmmap" {
+			return 0
+		}
+		vmmapAsked = true
+		return time.Millisecond
+	}
 	townRoot := testTown(t)
 	pid := f.doltServer(townRoot, port)
 	writePIDFile(t, h, townRoot, pid)
@@ -255,21 +263,46 @@ func TestGetHealthMetrics_HungVMMapReadsAsUnavailable(t *testing.T) {
 	release := f.hangOn(key)
 	defer close(release)
 
-	start := time.Now()
 	metrics := h.GetHealthMetrics(townRoot)
-	elapsed := time.Since(start)
 	f.awaitHung(t, key)
 
+	if !vmmapAsked {
+		t.Error("vmmap was never asked for a probe deadline, so the footprint probe did not go through probeTimeout")
+	}
 	if metrics.FootprintBytes != 0 || metrics.FootprintPeakBytes != 0 {
 		t.Errorf("hung vmmap reported footprint %d / peak %d, want both zero",
 			metrics.FootprintBytes, metrics.FootprintPeakBytes)
 	}
-	if elapsed < footprintProbeTimeout {
-		t.Errorf("status returned after %v, before the %v footprint deadline", elapsed, footprintProbeTimeout)
+}
+
+// TestProductionProbeTimeout pins the deadlines the real machine gives each
+// probe: vmmap gets the footprint deadline, which is below the default, and
+// every other probe gets zero, so it keeps probeTimeoutDefault.
+func TestProductionProbeTimeout(t *testing.T) {
+	t.Parallel()
+
+	if footprintProbeTimeout >= probeTimeoutDefault {
+		t.Errorf("footprint deadline %v is not below the default %v", footprintProbeTimeout, probeTimeoutDefault)
 	}
-	if elapsed >= probeTimeoutDefault {
-		t.Errorf("hung vmmap held the status for %v, which is the default %v, not the %v footprint deadline",
-			elapsed, probeTimeoutDefault, footprintProbeTimeout)
+
+	tests := []struct {
+		name string
+		argv []string
+		want time.Duration
+	}{
+		{name: "vmmap gets the footprint deadline", argv: []string{"vmmap", "-summary", "4711"}, want: footprintProbeTimeout},
+		{name: "lsof keeps the default", argv: []string{"lsof", "-i", ":4600", "-sTCP:LISTEN", "-t"}},
+		{name: "ss keeps the default", argv: []string{"ss", "-tlnp", "sport = :4600"}},
+		{name: "docker keeps the default", argv: []string{"docker", "inspect", "-f", "{{.State.Running}}", "dolt"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := productionProbeTimeout(tc.argv); got != tc.want {
+				t.Errorf("productionProbeTimeout(%v) = %v, want %v", tc.argv, got, tc.want)
+			}
+		})
 	}
 }
 
