@@ -153,6 +153,9 @@ type Host struct {
 	// reads the previous run's lines from TIER_SWEEP_TIMINGS. A nil ReadFile
 	// takes os.ReadFile in Run.
 	ReadFile func(name string) ([]byte, error)
+	// CgroupDir is the directory the container's cgroup counters are read from.
+	// Empty samples nothing, so a fake host opts out by leaving it out.
+	CgroupDir string
 	// Rename renames a file, as os.Rename does: it puts the temp file over
 	// TIER_SWEEP_TIMINGS, so a reader never sees a torn file. A nil Rename takes
 	// os.Rename in Run.
@@ -188,6 +191,7 @@ var ProcessHost = Host{
 	AppendFile: appendToFile,
 	Remove:     os.Remove,
 	RemoveAll:  os.RemoveAll, ReadDir: os.ReadDir, Lstat: os.Lstat,
+	CgroupDir: "/sys/fs/cgroup",
 }
 
 // ParseOptions resolves one tier-sweep command line and the environment it

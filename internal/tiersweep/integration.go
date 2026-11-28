@@ -61,6 +61,10 @@ type Sweep struct {
 	// Timings receives one line per package a tier runs, and holds the lines for
 	// TIER_SWEEP_TIMINGS. Run sets it; nil writes no timings.
 	Timings *Timings
+	// Sample reads the container's cgroup counters around each package's
+	// command, so its line records what the container spent while it ran. Run
+	// sets it from the host's CgroupDir; nil samples nothing.
+	Sample func() (CgroupSample, error)
 	// Walls is the previous run's wall time per tier and package, keyed by
 	// TimingsKey. Run sets it from TIER_SWEEP_TIMINGS before the first package
 	// starts; nil starts the packages in list order.
@@ -150,6 +154,7 @@ func (s *Sweep) Integration() (line string, red bool) {
 		Env:       env,
 		Stderr:    s.Stderr,
 		Timings:   s.Timings,
+		Sample:    s.Sample,
 		Now:       s.Now,
 		Jobs:      s.Opts.Jobs,
 		Walls:     s.Walls,
