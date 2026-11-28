@@ -487,8 +487,8 @@ func TestIntegrationCICacheTrimLRUSelects(t *testing.T) {
 // TestIntegrationCICacheTrimSelection feeds the selection parser the real list
 // program's stdout, not a constant reply: the program and the parser agree on
 // the wire only if every file line it prints is a clean absolute path strictly
-// under the root, one per removed file, and the three figures it prints are the
-// three the parser reads. The unit tier proves the parser on constant replies;
+// under the root, one per removed file, and the figures it prints are the ones
+// the parser reads. The unit tier proves the parser on constant replies;
 // this proves the pair on the program's own output, so a change to either side's
 // format is red here rather than in the daemon.
 func TestIntegrationCICacheTrimSelection(t *testing.T) {
@@ -534,8 +534,8 @@ func TestIntegrationCICacheTrimSelection(t *testing.T) {
 
 		// An age past every file's, so the age rule selects none, and a cap
 		// above the volume, so the cut's excess is negative and it stops at the
-		// first candidate: the program prints the three figures only, and the
-		// parser sees no file line.
+		// first candidate: the program prints the reply only, and the parser
+		// sees no file line.
 		capKiB := ciCacheLRUBefore(t, root) + 1024
 		stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "600", strconv.FormatInt(capKiB, 10), strconv.Itoa(ciCacheLRUFloorMinutes))
 		if status != 0 {
@@ -555,6 +555,56 @@ func TestIntegrationCICacheTrimSelection(t *testing.T) {
 		}
 		if got.removed != 0 {
 			t.Errorf("removed = %d, want 0 under the cap", got.removed)
+		}
+	})
+}
+
+// TestIntegrationCICacheYoungLRUScript: the LRU program reports the bytes its age
+// floor keeps on a fourth line, young_kib, after after_kib in both modes. Here
+// the listing holds the tree's four files past the floor, 256 KiB each, so the
+// figure is before_kib minus 1024: the volume's other bytes — the two files
+// inside the floor, the root's own trim.txt, and the directory blocks du counts
+// into before_kib that no file size covers.
+func TestIntegrationCICacheYoungLRUScript(t *testing.T) {
+	t.Parallel()
+	const listedKiB = 4 * 256
+
+	for _, mode := range []string{"list", "apply"} {
+		t.Run(mode+" reports the bytes inside the floor", func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			ciCacheLRUTreeWrite(t, root, time.Now())
+			stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, mode, root, "120", "0", strconv.Itoa(ciCacheLRUFloorMinutes))
+			if status != 0 {
+				t.Fatalf("the LRU program exited %d: %s", status, stderr)
+			}
+			if _, reply := ciCacheLRURead(t, stdout); !reply.youngReported || reply.youngKiB != reply.beforeKiB-listedKiB {
+				t.Errorf("young_kib = %d (reported %t), want before_kib %d less the listing's %d KiB:\n%s",
+					reply.youngKiB, reply.youngReported, reply.beforeKiB, listedKiB, stdout)
+			}
+		})
+	}
+
+	t.Run("a listing larger than du's figure reports 0", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUTreeWrite(t, root, time.Now())
+		// du counts a hard-linked inode once and the listing holds both names, so
+		// the subtraction goes below zero; the line reads 0, never a negative the
+		// parser would refuse. before_kib's check proves du counted it once.
+		if err := os.Link(filepath.Join(root, "00", "old-3h"), filepath.Join(root, "ab", "hardlink")); err != nil {
+			t.Fatalf("hard-linking the old file: %v", err)
+		}
+		stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "120", "0", strconv.Itoa(ciCacheLRUFloorMinutes))
+		if status != 0 {
+			t.Fatalf("the LRU program exited %d: %s", status, stderr)
+		}
+		_, reply := ciCacheLRURead(t, stdout)
+		if reply.beforeKiB >= listedKiB+256 {
+			t.Fatalf("before_kib = %d, want below the listing's %d KiB: du must count the hard link once", reply.beforeKiB, listedKiB+256)
+		}
+		if reply.youngKiB != 0 {
+			t.Errorf("young_kib = %d, want 0: the listing is larger than before_kib", reply.youngKiB)
 		}
 	})
 }
@@ -842,12 +892,12 @@ func TestIntegrationCICacheTrimLRUUnderCapAndMode(t *testing.T) {
 // TestIntegrationCICacheTrimLRUApplyRemovesOldestFirst runs apply over the tree
 // the list cases use, at the same cap: it removes exactly the files list prints —
 // the age rule's file, then the window's oldest until the excess is covered,
-// oldest first — and keeps the newest. Its reply is the three lines
+// oldest first — and keeps the newest. Its reply is the four lines
 // parseCICacheTrimReply reads and no file line, and its after_kib is the volume
 // read again after the removal, at or under the cap.
 //
 // Removing the mode's removal branch leaves every file in place and turns this
-// test red; printing the selection as list does makes the reply more than three
+// test red; printing the selection as list does makes the reply more than four
 // lines and turns it red; keeping the list's after_kib equal to before_kib turns
 // the re-read assertion red.
 func TestIntegrationCICacheTrimLRUApplyRemovesOldestFirst(t *testing.T) {
@@ -1580,20 +1630,24 @@ func ciCacheLRUWindowTree(t *testing.T, root string, now time.Time) {
 }
 
 // ciCacheLRURead splits an LRU program's output: the file lines it selected, in
-// the order it printed them, and the three-line reply that follows them. The
-// reply must be there: a run read as zero figures would read as a trim that
-// removed nothing.
+// the order it printed them, and the reply that follows them — the three figures
+// and the young_kib line the program appends. The reply must be there: a run read
+// as zero figures would read as a trim that removed nothing.
 func ciCacheLRURead(t *testing.T, stdout string) ([]string, ciCacheTrimReply) {
 	t.Helper()
 	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
-	if len(lines) < 3 {
-		t.Fatalf("the LRU program printed %d line(s), want three at least:\n%s", len(lines), stdout)
+	figures := 3
+	if strings.HasPrefix(lines[len(lines)-1], "young_kib=") {
+		figures = 4
 	}
-	reply, err := parseCICacheTrimReply([]byte(strings.Join(lines[len(lines)-3:], "\n") + "\n"))
+	if len(lines) < figures {
+		t.Fatalf("the LRU program printed %d line(s), want %d at least:\n%s", len(lines), figures, stdout)
+	}
+	reply, err := parseCICacheTrimReply([]byte(strings.Join(lines[len(lines)-figures:], "\n") + "\n"))
 	if err != nil {
 		t.Fatalf("the LRU program's reply does not parse: %v:\n%s", err, stdout)
 	}
-	return lines[:len(lines)-3], reply
+	return lines[:len(lines)-figures], reply
 }
 
 // ciCacheLRUBefore returns the volume tree's size in KiB, measured with du -sk:
@@ -1799,8 +1853,8 @@ func TestIntegrationCICacheTrimLRUArguments(t *testing.T) {
 // refused with exit 3 and a message on stderr; an argument count other than the
 // five the daemon passes is refused with exit 2 before the program reads an
 // argument, so the status does not depend on the shell's unset-variable
-// behavior; and a successful run ends with the three reply lines in the order
-// the parser reads them: before_kib, removed, after_kib.
+// behavior; and a successful run ends with the four reply lines in the order
+// the parser reads them: before_kib, removed, after_kib, young_kib.
 func TestIntegrationCICacheTrimLRUContract(t *testing.T) {
 	t.Parallel()
 
@@ -1861,7 +1915,7 @@ func TestIntegrationCICacheTrimLRUContract(t *testing.T) {
 		}
 	})
 
-	t.Run("a successful reply ends with the three figures in order", func(t *testing.T) {
+	t.Run("a successful reply ends with the four figures in order", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
 		ciCacheLRUTreeWrite(t, root, time.Now())
@@ -1874,11 +1928,11 @@ func TestIntegrationCICacheTrimLRUContract(t *testing.T) {
 			t.Fatalf("the LRU program exited %d: %s", status, stderr)
 		}
 		lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
-		if len(lines) < 3 {
+		if len(lines) < 4 {
 			t.Fatalf("the LRU program printed %d line(s), want a reply at least:\n%s", len(lines), stdout)
 		}
-		for i, key := range []string{"before_kib", "removed", "after_kib"} {
-			if line := lines[len(lines)-3+i]; !strings.HasPrefix(line, key+"=") {
+		for i, key := range []string{"before_kib", "removed", "after_kib", "young_kib"} {
+			if line := lines[len(lines)-4+i]; !strings.HasPrefix(line, key+"=") {
 				t.Errorf("the reply's line %d is %q, want %s=N", i+1, line, key)
 			}
 		}
