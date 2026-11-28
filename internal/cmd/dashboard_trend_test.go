@@ -367,24 +367,27 @@ func TestBuildRecentLandingsJoinsStagesAndOrdersNewestFirst(t *testing.T) {
 	}
 }
 
-// A landing that reused a stored review carries that on its row, with no om
-// time; one whose om ran carries the time and not the flag. The stage lines go
-// through the reader's own parse, so the suffix that sets the flag is the one
-// the log writes (gt-amwavi).
+// A landing that reused a stored review carries its cost beside the reused
+// mark, landed or rejected; one whose om ran carries the time and not the mark.
+// The stage lines go through the reader's own parse, so the suffix that sets
+// the mark is the one the log writes (gt-i99dm3).
 func TestLandingRowOMReused(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 26, 18, 0, 0, 0, time.Local)
 	r := &omReader{}
-	r.parseLogLine("2026/11/26 17:50:00 landing_worker: [land] gt-reused: stages: ci 1m32s, om reused (38s, 3s old)")
+	r.parseLogLine("2026/11/26 17:50:00 landing_worker: [land] gt-reused: stages: ci 1m32s, om reused (38s, 2m5s old)")
 	r.parseLogLine("2026/11/26 17:51:00 landing_worker: [land] gt-ran: stages: lint 4s, gate 1m, om 40s")
-	if len(r.stages) != 2 {
-		t.Fatalf("parsed %d stage lines, want 2: %+v", len(r.stages), r.stages)
+	r.parseLogLine("2026/11/26 17:52:00 landing_worker: [land] gt-rej: stages: ci 1m32s, om reused (38s, 2m5s old)")
+	r.parseLogLine("2026/11/26 17:53:00 landing_worker: [land] gt-rej: rejected (review): om requested changes")
+	if len(r.stages) != 3 {
+		t.Fatalf("parsed %d stage lines, want 3: %+v", len(r.stages), r.stages)
 	}
 	recs := []omRecord{
 		{Record: landings.Record{Bead: "gt-reused", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-10 * time.Minute)}},
 		{Record: landings.Record{Bead: "gt-ran", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-9 * time.Minute)}},
 	}
-	rows := buildRecentLandings(now, recs, r.stages, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, nil, recentLandingRows)
+	rejs := []omRejection{{At: now.Add(-7 * time.Minute), Bead: "gt-rej", Kind: "review", Detail: "om requested changes"}}
+	rows := buildRecentLandings(now, recs, r.stages, rejs, nil, nil, nil, landingNames{}, nil, nil, nil, nil, nil, recentLandingRows)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, row := range rows {
 		byBead[row.Bead] = row
@@ -393,8 +396,15 @@ func TestLandingRowOMReused(t *testing.T) {
 	if !ok {
 		t.Fatalf("no row for gt-reused: %+v", rows)
 	}
-	if !reused.Reused || reused.OMSecs != nil {
-		t.Errorf("reused landing row = reused %v, om %v; want the flag set and no om time", reused.Reused, reused.OMSecs)
+	if !reused.Reused || reused.OMSecs == nil || *reused.OMSecs != 38 {
+		t.Errorf("reused landing row = reused %v, om %v; want the flag set and 38s", reused.Reused, reused.OMSecs)
+	}
+	rj, ok := byBead["gt-rej"]
+	if !ok {
+		t.Fatalf("no row for gt-rej: %+v", rows)
+	}
+	if rj.Outcome != "rejected" || !rj.Reused || rj.OMSecs == nil || *rj.OMSecs != 38 {
+		t.Errorf("rejected reused row = outcome %q, reused %v, om %v; want rejected, the flag and 38s", rj.Outcome, rj.Reused, rj.OMSecs)
 	}
 	ran, ok := byBead["gt-ran"]
 	if !ok {
@@ -403,8 +413,8 @@ func TestLandingRowOMReused(t *testing.T) {
 	if ran.Reused || ran.OMSecs == nil || *ran.OMSecs != 40 {
 		t.Errorf("ran landing row = reused %v, om %v; want the om time and not the flag", ran.Reused, ran.OMSecs)
 	}
-	// The page reads the wire form, so the row names the flag om_reused and
-	// leaves om_secs absent on a reused landing.
+	// The page reads the wire form, so a reused row names both om_reused and
+	// the cost its stored review took; a run row names only om_secs.
 	wire := func(row dashboard.LandingRow) map[string]any {
 		t.Helper()
 		b, err := json.Marshal(row)
@@ -417,10 +427,8 @@ func TestLandingRowOMReused(t *testing.T) {
 		}
 		return m
 	}
-	if m := wire(reused); m["om_reused"] != true {
-		t.Errorf("reused row's om_reused = %v, want true", m["om_reused"])
-	} else if _, ok := m["om_secs"]; ok {
-		t.Errorf("reused row carries om_secs %v, want none", m["om_secs"])
+	if m := wire(reused); m["om_reused"] != true || m["om_secs"] != float64(38) {
+		t.Errorf("reused row's wire form = %v, want om_reused true and om_secs 38", m)
 	}
 	if m := wire(ran); m["om_secs"] != float64(40) {
 		t.Errorf("ran row's om_secs = %v, want 40", m["om_secs"])

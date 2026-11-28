@@ -802,23 +802,25 @@ func TestOMConfigAbsentIsNoConfig(t *testing.T) {
 }
 
 // TestReviewPoolOMStageReusedFlag drives whole stage log lines through the
-// reader's parse, the call that builds omStage, and checks the Reused flag and
-// the om time. A reused landing's om time is nil: its verdict was stored, not
-// run, so the panel's average skips it.
+// reader's parse, the call that builds omStage, and checks the Reused mark and
+// the om time. A reused landing's OM is the cost its stored review took, unless
+// the suffix is malformed; then the mark stays and there is no time (gt-i99dm3).
 func TestReviewPoolOMStageReusedFlag(t *testing.T) {
 	t.Parallel()
+	sec := func(n int) *time.Duration { d := time.Duration(n) * time.Second; return &d }
 	cases := []struct {
 		name   string
 		stages string
 		reused bool
+		om     *time.Duration
 	}{
-		{"reused form", "ci 1m32s, om reused (2m31s, 14m0s old)", true},
-		{"malformed cost still reused", "ci 1m32s, om reused (x, 14m0s old)", true},
-		{"negative age still reused", "ci 1m32s, om reused (2m31s, -14m0s old)", true},
-		{"negative cost still reused", "ci 1m32s, om reused (-2m31s, 14m0s old)", true},
-		{"plain om line", "lint 3s, gate 1m, om 20s", false},
-		{"waiver form", "ci 1m32s, om skipped (overseer-reviewed)", false},
-		{"skipped gate", "ci skipped (om rejected), om 12s", false},
+		{"reused form", "ci 1m32s, om reused (2m31s, 14m0s old)", true, sec(151)},
+		{"malformed cost still reused", "ci 1m32s, om reused (x, 14m0s old)", true, nil},
+		{"negative age still reused", "ci 1m32s, om reused (2m31s, -14m0s old)", true, nil},
+		{"negative cost still reused", "ci 1m32s, om reused (-2m31s, 14m0s old)", true, nil},
+		{"plain om line", "lint 3s, gate 1m, om 20s", false, sec(20)},
+		{"waiver form", "ci 1m32s, om skipped (overseer-reviewed)", false, nil},
+		{"skipped gate", "ci skipped (om rejected), om 12s", false, sec(12)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -832,16 +834,23 @@ func TestReviewPoolOMStageReusedFlag(t *testing.T) {
 			if st.Reused != tc.reused {
 				t.Errorf("Reused = %v, want %v (line %q)", st.Reused, tc.reused, tc.stages)
 			}
-			if tc.reused && st.OM != nil {
-				t.Errorf("reused form om = %v, want nil", *st.OM)
+			switch {
+			case tc.om == nil && st.OM != nil:
+				t.Errorf("om = %v, want nil (line %q)", *st.OM, tc.stages)
+			case tc.om != nil && st.OM == nil:
+				t.Errorf("om = nil, want %v (line %q)", *tc.om, tc.stages)
+			case tc.om != nil && *st.OM != *tc.om:
+				t.Errorf("om = %v, want %v (line %q)", *st.OM, *tc.om, tc.stages)
 			}
 		})
 	}
 }
 
 // TestReviewPoolOMPanelCountsReused: each window reports the stage records in it
-// that reused a stored review, and its om median covers only the records om ran.
-// The panel's start covers a reused record that is older than every review om ran.
+// that reused a stored review. A reused record built here with no OM carries no
+// time, so the median stays off the reviews om ran; a reused record whose suffix
+// parsed carries its cost and belongs in the figures (gt-i99dm3). The panel's
+// start covers a reused record older than every review om ran.
 func TestReviewPoolOMPanelCountsReused(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.Local)
@@ -858,8 +867,7 @@ func TestReviewPoolOMPanelCountsReused(t *testing.T) {
 	}{
 		{"one reused", append(slices.Clone(timed), omStage{At: h(4), Bead: "gt-3", Reused: true}),
 			map[string]int{"1h": 0, "6h": 1, "24h": 1, "7d": 1, "all": 1}},
-		// A second reused record would move the median if either counted as a
-		// review of no time.
+		// Neither reused record carries a time, so neither moves the median.
 		{"two reused", append(slices.Clone(timed), omStage{At: h(4), Bead: "gt-3", Reused: true}, omStage{At: h(5), Bead: "gt-4", Reused: true}),
 			map[string]int{"1h": 0, "6h": 2, "24h": 2, "7d": 2, "all": 2}},
 		{"reused before the shorter windows", append(slices.Clone(timed), omStage{At: h(48), Bead: "gt-3", Reused: true}),
@@ -893,6 +901,38 @@ func TestReviewPoolOMPanelCountsReused(t *testing.T) {
 			}
 			if !om.Since.Equal(earliest) {
 				t.Errorf("Since = %v, want %v, the oldest record counted", om.Since, earliest)
+			}
+		})
+	}
+}
+
+// TestDashboardOMReusedCostInFigures: a reused landing's parsed cost joins the
+// om median, p95 and daily average beside the reviews om ran; a reused suffix
+// that does not parse keeps the mark and adds no time (gt-i99dm3).
+func TestDashboardOMReusedCostInFigures(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.Local)
+	cases := []struct {
+		name, reused        string
+		median, p95, dayAvg float64
+	}{
+		{"parsed cost counts", "stages: ci 1m32s, om reused (38s, 2m5s old)", 38, 90, (30 + 90 + 38.0) / 3},
+		{"malformed suffix counts no time", "stages: ci 1m32s, om reused (x, 14m0s old)", 30, 90, 60},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &omReader{}
+			r.parseLogLine("2026/11/26 10:00:00 landing_worker: [land] gt-run-30: stages: lint 4s, gate 1m, om 30s")
+			r.parseLogLine("2026/11/26 10:30:00 landing_worker: [land] gt-run-90: stages: lint 4s, gate 1m, om 90s")
+			r.parseLogLine("2026/11/26 11:00:00 landing_worker: [land] gt-reused: " + tc.reused)
+			om := buildOM(now, nil, r.stages, nil, omConfig{})
+			// Windows are 1h, 6h, 24h, 7d, all; Days[0] is today.
+			if win := om.Windows[1]; win.Reused != 1 || win.MedianSecs == nil || *win.MedianSecs != tc.median || win.P95Secs == nil || *win.P95Secs != tc.p95 {
+				t.Errorf("6h window = reused %d, median %v, p95 %v; want 1, %v, %v", win.Reused, win.MedianSecs, win.P95Secs, tc.median, tc.p95)
+			}
+			if day := om.Days[0]; day.AvgSecs == nil || *day.AvgSecs != tc.dayAvg {
+				t.Errorf("today om average = %v, want %v", day.AvgSecs, tc.dayAvg)
 			}
 		})
 	}

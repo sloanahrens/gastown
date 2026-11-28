@@ -97,9 +97,10 @@ var (
 const infraFailedMarker = ": landing failed ("
 
 // omStage is one gated merge's stage timings, off a "stages:" log line. A
-// stage the line does not name is nil; om is nil when the review did not run,
-// and a reused landing's om is nil too: its verdict was stored, not run.
-// Reused is set when the line carries the reused-verdict suffix.
+// stage the line does not name is nil. OM is the review's own time: a reused
+// landing carries the cost its stored review took, and nil when the reused
+// suffix does not parse. Reused is set when the line carries that suffix, so a
+// reused landing keeps its mark beside its cost.
 type omStage struct {
 	At     time.Time
 	Bead   string
@@ -883,6 +884,9 @@ func (r *omReader) parseLogLine(line string) {
 	if m := omStageRe.FindStringSubmatch(line); m != nil {
 		lint, gate, om := omStageTimes(m[3])
 		reused := strings.Contains(m[3], omReusedMarker)
+		if cost, _, ok := omStageReused(m[3]); ok {
+			om = &cost
+		}
 		r.stages = append(r.stages, omStage{At: at, Bead: m[2], Lint: lint, Gate: gate, OM: om, Reused: reused})
 		return
 	}
@@ -976,8 +980,9 @@ func omStageDuration(stages string) *time.Duration {
 // Forgejo CI (StageCI in internal/land), so its line is "ci 2m46s, om 21s". A
 // line that names both prefers the explicit gate.
 //
-// A line that carries omReusedMarker has no om time: the landing reused a stored
-// review and ran no om, whatever else the line names.
+// A line that carries omReusedMarker names no om stage of its own, whatever
+// else it names: the cost of the stored review it reused is read by
+// omStageReused instead.
 func omStageTimes(stages string) (lint, gate, om *time.Duration) {
 	reused := strings.Contains(stages, omReusedMarker)
 	for _, part := range strings.Split(stages, ", ") {
@@ -1200,8 +1205,8 @@ func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejectio
 	}
 
 	for _, st := range stages {
-		// Counted before the skip below: a reused landing carries no om time,
-		// so it adds to this count and to no om duration.
+		// Counted before the skip below: the mark is there whether or not the
+		// suffix's cost parsed, and only a parsed cost joins the om durations.
 		if st.Reused {
 			note(st.At)
 			for i := range wins {
