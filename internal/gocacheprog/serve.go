@@ -41,24 +41,42 @@ type Stats struct {
 
 // answer applies one request to store and reports whether serving stops after
 // writing its response.
-func answer(req *Request, store Store, stats *Stats) (*Response, bool) { //nolint:unparam // close, served by a later piece, is the request that stops serving (gt-1q88j6)
-	if req.Command != CmdGet {
-		stats.Errors++
-		return &Response{ID: req.ID, Err: "gocacheprog: unknown command " + strconv.Quote(string(req.Command))}, false
+func answer(req *Request, store Store, stats *Stats) (*Response, bool) {
+	switch req.Command {
+	case CmdGet:
+		stats.Gets++
+		e, err := store.Get(req.ActionID)
+		if errors.Is(err, ErrMiss) {
+			stats.Misses++
+			return &Response{ID: req.ID, Miss: true}, false
+		}
+		if err != nil {
+			// A cache fault is a miss: it must never fail a build.
+			stats.Misses++
+			stats.Errors++
+			return &Response{ID: req.ID, Miss: true}, false
+		}
+		stats.Hits++
+		stats.HitBytes += e.Size
+		return &Response{ID: req.ID, OutputID: e.OutputID, Size: e.Size, Time: &e.Time, DiskPath: e.DiskPath}, false
+	case CmdPut:
+		stats.Puts++
+		path, err := store.Put(req.ActionID, req.OutputID, req.Body)
+		if err != nil {
+			stats.Errors++
+			return &Response{ID: req.ID, Err: err.Error()}, false
+		}
+		stats.PutBytes += int64(len(req.Body))
+		return &Response{ID: req.ID, DiskPath: path}, false
+	case CmdClose:
+		// A store that holds resources is closed once; a store without Close just stops.
+		if c, ok := store.(interface{ Close() error }); ok {
+			if err := c.Close(); err != nil {
+				stats.Errors++
+			}
+		}
+		return &Response{ID: req.ID}, true
 	}
-	stats.Gets++
-	e, err := store.Get(req.ActionID)
-	if errors.Is(err, ErrMiss) {
-		stats.Misses++
-		return &Response{ID: req.ID, Miss: true}, false
-	}
-	if err != nil {
-		// A cache fault is a miss: it must never fail a build.
-		stats.Misses++
-		stats.Errors++
-		return &Response{ID: req.ID, Miss: true}, false
-	}
-	stats.Hits++
-	stats.HitBytes += e.Size
-	return &Response{ID: req.ID, OutputID: e.OutputID, Size: e.Size, Time: &e.Time, DiskPath: e.DiskPath}, false
+	stats.Errors++
+	return &Response{ID: req.ID, Err: "gocacheprog: unknown command " + strconv.Quote(string(req.Command))}, false
 }
