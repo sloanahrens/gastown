@@ -301,3 +301,106 @@ func TestCacheProgStatsMoveFails(t *testing.T) {
 		}
 	})
 }
+
+// must fails the test when err is not nil.
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCacheProgStatsRefuses: a stats file that is a link or a directory, or one under a linked gtprog
+// directory, is an error naming the stats file. Nothing is copied or removed, and what it stands for stays.
+func TestCacheProgStatsRefuses(t *testing.T) {
+	t.Parallel()
+	cases := map[string]func(t *testing.T, root string) (src, kept string){
+		"symlinked stats file": func(t *testing.T, root string) (string, string) {
+			target := planted(t, "elsewhere.jsonl", []byte("kept\n"))
+			src := statsAt(t, root, nil)
+			must(t, os.Remove(src))
+			must(t, os.Symlink(target, src))
+			return src, target
+		},
+		"stats file is a directory": func(t *testing.T, root string) (string, string) {
+			src := statsAt(t, root, nil)
+			must(t, os.Remove(src))
+			must(t, os.Mkdir(src, 0o755))
+			return src, src
+		},
+		"symlinked gtprog directory": func(t *testing.T, root string) (string, string) {
+			elsewhere := t.TempDir()
+			target := statsAt(t, elsewhere, []byte("kept\n"))
+			must(t, os.Symlink(filepath.Join(elsewhere, cacheProgDirName), filepath.Join(root, cacheProgDirName)))
+			return filepath.Join(root, cacheProgDirName, cacheProgStatsName), target
+		},
+	}
+	for name, plant := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cacheRoot, logDir := t.TempDir(), t.TempDir()
+			src, kept := plant(t, cacheRoot)
+			err := moveCacheProgStats(cacheRoot, logDir, func(string) error { t.Error("a path was removed"); return nil })
+			_, copyErr := os.Lstat(filepath.Join(logDir, cacheProgStatsCopyName))
+			if err == nil || !strings.Contains(err.Error(), src) || !os.IsNotExist(copyErr) {
+				t.Fatalf("err = %v, copy Lstat err = %v; want an error naming %s and no copy", err, copyErr, src)
+			}
+			for _, p := range []string{src, kept} {
+				_, serr := os.Lstat(p)
+				must(t, serr)
+			}
+		})
+	}
+}
+
+// TestCacheProgStatsOverLimit: a source over the limit is removed uncopied through remove, and the error says
+// so. When that removal fails, the error holds the size refusal and the removal failure, and the source stays.
+func TestCacheProgStatsOverLimit(t *testing.T) {
+	t.Parallel()
+	t.Run("removed uncopied", func(t *testing.T) {
+		t.Parallel()
+		cacheRoot, logDir := t.TempDir(), t.TempDir()
+		src := statsAt(t, cacheRoot, nil)
+		must(t, os.Truncate(src, cacheProgStatsMaxBytes+1))
+		var removed []string
+		err := moveCacheProgStats(cacheRoot, logDir, func(name string) error { removed = append(removed, name); return os.Remove(name) })
+		if err == nil || !strings.Contains(err.Error(), src) || !strings.Contains(err.Error(), "removed uncopied") {
+			t.Fatalf("err = %v; want an error naming %s that says it was removed uncopied", err, src)
+		}
+		if len(removed) != 1 || removed[0] != src {
+			t.Errorf("removed = %v; want only %s", removed, src)
+		}
+		if ents, _ := os.ReadDir(logDir); len(ents) != 0 {
+			t.Errorf("log directory has %d entries; want no copy", len(ents))
+		}
+	})
+	t.Run("removal fails", func(t *testing.T) {
+		t.Parallel()
+		cacheRoot, logDir := t.TempDir(), t.TempDir()
+		src := statsAt(t, cacheRoot, nil)
+		must(t, os.Truncate(src, cacheProgStatsMaxBytes+1))
+		err := moveCacheProgStats(cacheRoot, logDir, func(string) error { return errInjected })
+		if !errors.Is(err, errInjected) || !strings.Contains(err.Error(), src) || !strings.Contains(err.Error(), "byte limit") {
+			t.Fatalf("err = %v; want the size refusal and a removal failure wrapping %v, naming %s", err, errInjected, src)
+		}
+		info, serr := os.Lstat(src)
+		if serr != nil || info.Size() != cacheProgStatsMaxBytes+1 {
+			t.Errorf("source = %v, %v; want it kept at %d bytes", info, serr, cacheProgStatsMaxBytes+1)
+		}
+	})
+}
+
+// TestCacheProgStatsAtLimit: a source of exactly the size limit is moved like any other.
+func TestCacheProgStatsAtLimit(t *testing.T) {
+	t.Parallel()
+	cacheRoot, logDir := t.TempDir(), t.TempDir()
+	src := statsAt(t, cacheRoot, nil)
+	must(t, os.Truncate(src, cacheProgStatsMaxBytes))
+	must(t, moveCacheProgStats(cacheRoot, logDir, os.Remove))
+	if info, err := os.Stat(filepath.Join(logDir, cacheProgStatsCopyName)); err != nil || info.Size() != cacheProgStatsMaxBytes {
+		t.Errorf("copy = %v, %v; want %d bytes", info, err, cacheProgStatsMaxBytes)
+	}
+	if _, err := os.Lstat(src); !os.IsNotExist(err) {
+		t.Errorf("source left behind, Lstat err = %v", err)
+	}
+}
