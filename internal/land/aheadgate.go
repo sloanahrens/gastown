@@ -38,7 +38,8 @@ type aheadCar struct {
 // the bead, head and base Start was given, and the merged commit report
 // recorded when run's own result names none (gt-6ivh2m). It starts nothing and
 // returns false on a nil slot, with a nil run, or while a car is held. discard
-// is only stored.
+// is called at most once, by a Take or Close that abandons a car whose run
+// reported a merged commit; a nil discard discards nothing.
 func (s *AheadSlot) Start(ctx context.Context, bead, head, base string, run func(ctx context.Context, report func(merged string)) (AheadGate, error), discard func(AheadGate)) bool {
 	if s == nil || run == nil {
 		return false
@@ -74,9 +75,10 @@ func (s *AheadSlot) Start(ctx context.Context, bead, head, base string, run func
 // Take waits for the held car to finish, then empties the slot and returns the
 // gate and true when the car matches bead, head and base and its run returned no
 // error. A failed run empties the slot and returns false. A key that differs in
-// any of the three, or an empty slot, returns false and leaves the car held. If
-// ctx ends first, Take returns false and the car stays held. Take holds no lock
-// while it waits.
+// any of the three abandons the car: Take cancels its run, waits for it to end,
+// discards it when its run reported a merged commit, empties the slot and
+// returns false. A Take whose own ctx ends before the run does abandons the car
+// the same way. An empty slot returns false. Take holds no lock while it waits.
 func (s *AheadSlot) Take(ctx context.Context, bead, head, base string) (AheadGate, bool) {
 	if s == nil {
 		return AheadGate{}, false
@@ -84,7 +86,11 @@ func (s *AheadSlot) Take(ctx context.Context, bead, head, base string) (AheadGat
 	s.mu.Lock()
 	car := s.car
 	s.mu.Unlock()
-	if car == nil || car.bead != bead || car.head != head || car.base != base {
+	if car == nil {
+		return AheadGate{}, false
+	}
+	if car.bead != bead || car.head != head || car.base != base {
+		s.abandon(car)
 		return AheadGate{}, false
 	}
 	select {
@@ -93,6 +99,7 @@ func (s *AheadSlot) Take(ctx context.Context, bead, head, base string) (AheadGat
 		select {
 		case <-car.done:
 		case <-ctx.Done():
+			s.abandon(car)
 			return AheadGate{}, false
 		}
 	}
@@ -106,6 +113,42 @@ func (s *AheadSlot) Take(ctx context.Context, bead, head, base string) (AheadGat
 		return AheadGate{}, false
 	}
 	return car.gate, true
+}
+
+// Close cancels the held car's run, waits for it to end, discards it when its
+// run reported a merged commit, and empties the slot. A nil or empty slot does
+// nothing.
+func (s *AheadSlot) Close() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	car := s.car
+	s.mu.Unlock()
+	if car != nil {
+		s.abandon(car)
+	}
+}
+
+// abandon cancels car's run and waits for it to end, then empties the slot and
+// discards the car once when its run reported a merged commit. A car another
+// Take or Close already emptied is left alone, so a taken car is never
+// discarded and a car is discarded at most once.
+func (s *AheadSlot) abandon(car *aheadCar) {
+	car.cancel()
+	<-car.done
+	s.mu.Lock()
+	if s.car != car {
+		s.mu.Unlock()
+		return
+	}
+	s.car = nil
+	gate, discard := car.gate, car.discard
+	s.mu.Unlock()
+	if gate.Merged == "" || discard == nil {
+		return
+	}
+	discard(gate)
 }
 
 // Pending reports the key of the held car and whether one is held, also after
