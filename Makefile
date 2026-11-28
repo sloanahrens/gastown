@@ -560,6 +560,10 @@ GATE_WALLS = -jsonl .runtime/metrics/gate-walls.jsonl -run gate-$$(date +%s)-$$$
 # It runs under umask 022 whatever the caller's is (gt-nmd2xg), so a CI job
 # container that starts open cannot fail a test a seat passed. Each recipe line
 # is its own shell, so each line that writes files sets the umask itself.
+# The red-on-base check (gt-kelgqa) runs after the unit tier, the vet and the
+# error-branch check have all passed, and before the verdict. A failed stage
+# keeps its own verdict and runs no redbase. A redbase failure exits non-zero
+# with "gate: FAILED at redbase".
 gate-test: GATE_START := $(shell date +%s)
 gate-test:
 	@old=$$(umask); umask 022; echo "gate: umask was $$old, running under 0022" >&2
@@ -631,6 +635,8 @@ gate-test:
 	eb=0; if [ $$go_rc -eq 0 ] && [ $$vet_rc -eq 0 ]; then t0=$$(date +%s); go run ./internal/presubmit/cmd/errbranch -base $(PRESUBMIT_BASE) -cover "$$cover" || eb=$$?; echo "gate: check errbranch $$(( $$(date +%s) - t0 ))s" >&2; fi; \
 	rm -f "$$cover"; \
 	if [ $$eb -ne 0 ]; then echo "gate: FAILED at errbranch" >&2; exit 1; fi; \
+	rb=0; if [ $$go_rc -eq 0 ] && [ $$vet_rc -eq 0 ] && [ $$eb -eq 0 ]; then t0=$$(date +%s); go run ./internal/presubmit/cmd/redbase -base $(PRESUBMIT_BASE) || rb=$$?; echo "gate: check redbase $$(( $$(date +%s) - t0 ))s" >&2; fi; \
+	if [ $$rb -ne 0 ]; then echo "gate: FAILED at redbase" >&2; exit 1; fi; \
 	wall=$$(( $$(date +%s) - $(GATE_START) )); \
 	go run ./internal/testpolicy/cmd/gateverdict -unit $$go_rc -vet $$vet_rc -wall $$wall
 
