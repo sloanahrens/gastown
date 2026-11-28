@@ -57,6 +57,8 @@ func TestRedBaseCheck(t *testing.T) {
 			"a/a_test.go:1: TestA passes without the change\nredbase: 1 new or changed test(s) in 1 package(s), 1 passing without the change\n", 1, 1},
 		{"an empty plan makes no tree and reports zero", redBaseSteps{}, nil, true, "",
 			"redbase: 0 new or changed test(s) in 0 package(s), 0 passing without the change\n", 0, 0},
+		{"a plan with no tests and a not-judged file prints its line and makes no tree", redBaseSteps{plan: RedBasePlanResult{Packages: []RedBasePackage{{Dir: "a", Files: []string{"a/a_test.go"}}}, NotJudged: []string{"plugins/x_test.go"}}}, nil, true, "",
+			"redbase: not judged: plugins/x_test.go\nredbase: 0 new or changed test(s) in 0 package(s), 0 passing without the change\n", 0, 0},
 		{"a failed plan is returned and no tree is made", redBaseSteps{planErr: boom}, nil, false, "boom", "", 0, 0},
 		{"a failed tree is returned and nothing is judged", redBaseSteps{plan: plan, treeErr: boom}, nil, false, "boom", "", 1, 0},
 		{"a failed judge is returned with the tree removed", redBaseSteps{plan: plan, judgeErr: boom}, nil, false, "boom", "", 1, 1},
