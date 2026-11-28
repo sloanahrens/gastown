@@ -40,6 +40,12 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	started := d.diskMaintenanceSeams().now()
 	sandboxes, _, err := d.cacheTrimPods(ctx, kubeconfig, namespace, claim.ClaimName)
 	if err != nil {
+		// A read the daemon's shutdown cut short is not a trim failure: record,
+		// park and raise nothing, and leave the mark for the restarted daemon.
+		if d.shuttingDown() {
+			d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the daemon is shutting down; the trim is left for the restarted daemon", claim.ClaimName, namespace)
+			return true
+		}
 		// A read the cluster refuses names the verb in an alert, and the pass
 		// skips the namespace; any other failure is only logged.
 		if d.cacheTrimPodListDenied(ctx, kubeconfig, namespace) {
@@ -68,8 +74,11 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	trimmed[namespace] = claim.ClaimName
 	// An earlier Job that completed after its wait is recorded before the stale
 	// Job is deleted and the new one applied, so its result is not lost.
-	if apply && !d.cacheTrimLateResult(ctx, kubeconfig, claim, namespace, started) {
-		return false
+	if apply {
+		// A skipped late read applies no Job; a failed one ends the pass.
+		if ok, skip := d.cacheTrimLateResult(ctx, kubeconfig, claim, namespace, started); skip || !ok {
+			return skip
+		}
 	}
 	removed, absent, kept, err := d.cacheTrimClaimJobRun(kubeconfig, claim, image, namespace, capBytes, sandboxes, apply)
 	if err != nil {
@@ -123,7 +132,10 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 // refuses the apply as pending, and so is a Job that did not complete. A Job the
 // controller marked Failed parks the claim, as a failed read does. It reports
 // false when the Job's state or result line cannot be read: the run is recorded
-// as failed, the claim parked and its mark cleared, like any other failure.
+// as failed, the claim parked and its mark cleared, like any other failure. A
+// failure the daemon's shutdown cut short is not a trim failure: it reports ok
+// and skip true, records, parks and raises nothing and leaves the mark for the
+// restart.
 //
 // The late read is for a claim a pass left pending (its Job still running at the
 // wait's end): a claim with no mark returns true at once, since a Job that
@@ -131,18 +143,24 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 // result whose Job completed after its wait and then outlives a daemon restart is
 // not read late; that loss is the accepted cost of recording each Job once, and
 // persisting the mark is gt-d4cxyx.
-func (d *Daemon) cacheTrimLateResult(ctx context.Context, kubeconfig string, claim cacheTrimClaim, namespace string, started time.Time) bool {
+func (d *Daemon) cacheTrimLateResult(ctx context.Context, kubeconfig string, claim cacheTrimClaim, namespace string, started time.Time) (ok, skip bool) {
 	// Only a claim a pass left pending has a result to read late: a Job that
 	// finished inside its own pass was recorded then, and is not recorded again.
 	if !d.cacheTrimIsPending(namespace, claim.ClaimName) {
-		return true
+		return true, false
 	}
 	jobName := cacheTrimJobName(claim.ClaimName)
-	fail := func(err error) bool {
+	fail := func(err error) (bool, bool) {
+		// A failure the daemon's shutdown cut short is not a trim failure: the mark
+		// is left for the restarted daemon.
+		if d.shuttingDown() {
+			d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the daemon is shutting down; the trim is left for the restarted daemon", claim.ClaimName, namespace)
+			return true, true
+		}
 		d.cacheTrimRecordRun(cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunFailed})
 		d.cacheTrimSetPending(namespace, claim.ClaimName, false)
 		d.cacheTrimPark(namespace, claim.ClaimName, err)
-		return false
+		return false, false
 	}
 	_, running, completed, failed, err := d.cacheTrimExisting(ctx, kubeconfig, namespace)
 	if err != nil {
@@ -157,7 +175,7 @@ func (d *Daemon) cacheTrimLateResult(ctx context.Context, kubeconfig string, cla
 		return fail(fmt.Errorf("the trim Job %s failed after a pass left it pending", jobName))
 	}
 	if running[jobName] || !completed[jobName] {
-		return true
+		return true, false
 	}
 	removed, absent, kept, err := d.cacheTrimRemovedCounts(ctx, kubeconfig, namespace, jobName)
 	if err != nil {
@@ -169,7 +187,7 @@ func (d *Daemon) cacheTrimLateResult(ctx context.Context, kubeconfig string, cla
 	// The late trim finished too, so it makes the same decision as a finished
 	// apply: a stale item goes when the disk it left reads under the percent.
 	d.cacheTrimDiskItem(claim.ClaimName, namespace)
-	return true
+	return true, false
 }
 
 // cacheTrimDiskItem decides the claim's cache-trim-noop item by the sandbox disk
