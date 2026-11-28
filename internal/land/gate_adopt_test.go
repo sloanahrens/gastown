@@ -18,15 +18,14 @@ var gatePassed = CandidateResult{State: CandidatePassed, Context: "ci / gate (pu
 type seqCandidate struct {
 	*fakeCandidate
 	results []CandidateResult
-	// ran, when set, is closed by the first gate run, which starts once the
-	// build has made its last write to the work root.
-	ran chan struct{}
+	// during, when set, runs inside the first gate run and is then cleared.
+	during func()
 }
 
 func (c *seqCandidate) Run(ctx context.Context, wt Repo, dir string, w Work, head string) CandidateResult {
-	if c.ran != nil {
-		close(c.ran)
-		c.ran = nil
+	if c.during != nil {
+		c.during()
+		c.during = nil
 	}
 	c.fakeCandidate.res = c.results[min(len(c.calls), len(c.results)-1)]
 	return c.fakeCandidate.Run(ctx, wt, dir, w, head)
@@ -72,23 +71,6 @@ func assertSlotOneGone(t *testing.T, f *landFixture) {
 	}
 }
 
-// buildFailureLog is the lander's log: it closes failed the first time the
-// gate-ahead build logs that it did not start.
-type buildFailureLog struct {
-	failed chan struct{}
-}
-
-func (b buildFailureLog) Write(p []byte) (int, error) {
-	if strings.Contains(string(p), "gate-ahead: not started") {
-		select {
-		case <-b.failed:
-		default:
-			close(b.failed)
-		}
-	}
-	return len(p), nil
-}
-
 // probeApprover answers the version probe a review key reads from keyFixture's
 // reviewer, and approves every review it is asked for.
 type probeApprover struct {
@@ -108,7 +90,7 @@ func (patchIDFails) PatchID(string, string) (string, error) {
 	return "", errors.New("patch-id read failed")
 }
 
-// TestGateAdoptLandsTheGatedCommit is train 4b-2: a car gated ahead on the
+// TestGateAdoptLandsTheGatedCommit is gt-wrefmz: a car gated ahead on the
 // target tip is adopted, so the landing merges and gates nothing and lands the
 // commit the one gate run tested.
 func TestGateAdoptLandsTheGatedCommit(t *testing.T) {
@@ -130,7 +112,7 @@ func TestGateAdoptLandsTheGatedCommit(t *testing.T) {
 	assertSlotOneGone(t, f)
 }
 
-// TestGateAdoptRedStoredResultRejects is train 4b-2: an adopted car whose stored
+// TestGateAdoptRedStoredResultRejects is gt-wrefmz: an adopted car whose stored
 // gate run is red is refused as a red gate is, with no second gate run.
 func TestGateAdoptRedStoredResultRejects(t *testing.T) {
 	t.Parallel()
@@ -144,7 +126,7 @@ func TestGateAdoptRedStoredResultRejects(t *testing.T) {
 	assertSlotOneGone(t, f)
 }
 
-// TestGateAdoptMovedTargetDiscards is train 4b-2: a car gated on a target tip
+// TestGateAdoptMovedTargetDiscards is gt-wrefmz: a car gated on a target tip
 // that has since moved is discarded, and the landing merges and gates on the
 // new tip as before.
 func TestGateAdoptMovedTargetDiscards(t *testing.T) {
@@ -161,7 +143,7 @@ func TestGateAdoptMovedTargetDiscards(t *testing.T) {
 	}
 }
 
-// TestGateAdoptChangedHeadDiscards is train 4b-2: a car gated for one head is
+// TestGateAdoptChangedHeadDiscards is gt-wrefmz: a car gated for one head is
 // discarded when the landing is for another head.
 func TestGateAdoptChangedHeadDiscards(t *testing.T) {
 	t.Parallel()
@@ -176,7 +158,7 @@ func TestGateAdoptChangedHeadDiscards(t *testing.T) {
 	assertDiscarded(t, f, cand, out)
 }
 
-// TestGateAdoptStoredErrorDiscards is train 4b-2: a car whose stored gate run
+// TestGateAdoptStoredErrorDiscards is gt-wrefmz: a car whose stored gate run
 // carries an error has its candidate discarded, and the landing gates its own.
 func TestGateAdoptStoredErrorDiscards(t *testing.T) {
 	t.Parallel()
@@ -192,7 +174,7 @@ func TestGateAdoptStoredErrorDiscards(t *testing.T) {
 	}
 }
 
-// TestGateAdoptPatchIDFailureRemovesWorktree is train 4b-2: a patch-id read
+// TestGateAdoptPatchIDFailureRemovesWorktree is gt-wrefmz: a patch-id read
 // that fails on an adopted car removes its worktree, returns the error and
 // leaves the target where it was.
 func TestGateAdoptPatchIDFailureRemovesWorktree(t *testing.T) {
@@ -221,35 +203,28 @@ func TestGateAdoptPatchIDFailureRemovesWorktree(t *testing.T) {
 	}
 }
 
-// TestGateAdoptIdentityFailureReturnsTheWorktreeError is train 4b-2: a car that
+// TestGateAdoptIdentityFailureReturnsTheWorktreeError is gt-wrefmz: a car that
 // cannot take a landing identity directory returns the error as a worktree
-// failure, the work root being unwritable.
+// failure. The build writes nothing to the work root after its gate run starts,
+// so the run replaces the root with a regular file; Take returns only after the
+// run ends, and the landing's identity directory cannot be made under it.
 func TestGateAdoptIdentityFailureReturnsTheWorktreeError(t *testing.T) {
 	t.Parallel()
 	f, l, _ := keyFixture(t)
-	ran := make(chan struct{})
-	cand := &seqCandidate{fakeCandidate: &fakeCandidate{}, results: []CandidateResult{gatePassed}, ran: ran}
-	failed := make(chan struct{})
-	l.Candidate, l.Out, l.Ahead2 = cand, buildFailureLog{failed}, &AheadSlot{}
+	cand := &seqCandidate{fakeCandidate: &fakeCandidate{}, results: []CandidateResult{gatePassed}}
+	cand.during = func() {
+		if err := os.RemoveAll(f.workRoot); err != nil {
+			t.Error(err)
+		}
+		if err := os.WriteFile(f.workRoot, []byte("not a directory\n"), 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	l.Candidate, l.Out, l.Ahead2 = cand, &strings.Builder{}, &AheadSlot{}
 	approveAheadMerge(t, f, l)
 	if !l.GateAhead(context.Background(), f.work, f.base) {
 		t.Fatal("GateAhead = false, want a car held")
 	}
-	// The build's writes to the work root are done once its gate run starts;
-	// a build that fails first never starts one, and its log line ends the wait.
-	select {
-	case <-ran:
-	case <-failed:
-		t.Fatal("the build failed before its gate run, so the work root was never written past it")
-	}
-	// The work root takes no new entry: read-only, the identity directory cannot
-	// be made, and the cleanup restores write so the fixture can be removed.
-	//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit
-	must(t, os.Chmod(f.workRoot, 0o500))
-	t.Cleanup(func() {
-		//testpolicy:allow no-exec-files — the target is the fixture directory: traversal needs its search bit back
-		_ = os.Chmod(f.workRoot, 0o700)
-	})
 	_, err := l.Land(context.Background(), f.work)
 	var infra *InfraError
 	if !errors.As(err, &infra) || infra.Stage != "worktree" {

@@ -141,7 +141,7 @@ func (l *Lander) mergeInWorktree(ctx context.Context, issue *beads.Issue, g Repo
 	return &car{w: w, issue: issue, g: g, wt: wt, base: base, merged: merged, patchID: patchID, dir: dir, landingID: id}, Result{}, nil
 }
 
-// takeGateAhead settles the car gated ahead, if one is held (train 4b-2). A car
+// takeGateAhead settles the car gated ahead, if one is held (gt-wrefmz). A car
 // Take returns for this bead, head and target tip, whose stored result carries
 // no error, is adopted: its worktree is the build's slot 1 directory, its merge
 // is the build's, and the car carries the stored result, so no merge or gate
