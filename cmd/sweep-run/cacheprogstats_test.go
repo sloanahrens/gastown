@@ -2,227 +2,132 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"syscall"
+	"strings"
 	"testing"
 )
 
-// stagedStats plants a stats file of content under a fresh cache root.
-func stagedStats(t *testing.T, content []byte) (root, src string) {
+// errInjected is the failure a faulty copy injects into a write or a close.
+var errInjected = errors.New("injected failure")
+
+// planted writes a file of content under a fresh directory and returns its path.
+func planted(t *testing.T, name string, content []byte) string {
 	t.Helper()
-	root = t.TempDir()
-	src = filepath.Join(root, cacheProgDirName, cacheProgStatsName)
-	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(src, content, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return root, src
+	return path
 }
 
-// sparseStats plants a stats file of size bytes without writing its contents.
-func sparseStats(t *testing.T, size int64) (root, src string) {
-	t.Helper()
-	root, src = stagedStats(t, nil)
-	if err := os.Truncate(src, size); err != nil {
-		t.Fatal(err)
-	}
-	return root, src
-}
-
-// refuse returns a removal that fails with err and records each path asked for.
-func refuse(asked *[]string) func(string) error {
-	return func(name string) error {
-		*asked = append(*asked, name)
-		return os.ErrPermission
+// faultyCopy wraps createCopy so the copy it makes fails on its write or on its close. The real file is
+// always closed, so the injected failure is the only difference.
+func faultyCopy(failWrite, failClose bool) copyCreator {
+	return func(name string) (io.WriteCloser, error) {
+		f, err := createCopy(name)
+		if err != nil {
+			return nil, err
+		}
+		return faultyFile{f, failWrite, failClose}, nil
 	}
 }
 
-// mustGone fails the test when path still exists.
-func mustGone(t *testing.T, path string) {
-	t.Helper()
-	if _, err := os.Lstat(path); !os.IsNotExist(err) {
-		t.Errorf("%s should be gone, Lstat err = %v", path, err)
-	}
+type faultyFile struct {
+	io.WriteCloser
+	failWrite, failClose bool
 }
 
-// mustKeep fails the test when path is gone.
-func mustKeep(t *testing.T, path string) {
-	t.Helper()
-	if _, err := os.Lstat(path); err != nil {
-		t.Errorf("%s should still exist: %v", path, err)
+func (f faultyFile) Write(p []byte) (int, error) {
+	if f.failWrite {
+		return 0, errInjected
 	}
+	return f.WriteCloser.Write(p)
 }
 
-// TestCacheProgStatsMove: the file is copied byte for byte, its source removed, and nil returned.
-func TestCacheProgStatsMove(t *testing.T) {
+func (f faultyFile) Close() error {
+	err := f.WriteCloser.Close()
+	if f.failClose {
+		return errInjected
+	}
+	return err
+}
+
+// TestCacheProgStatsCopy: the copy holds the source's bytes, and the source is left as it was.
+func TestCacheProgStatsCopy(t *testing.T) {
 	t.Parallel()
 	content := []byte("{\"hits\":1}\n\x00\xff\xfe tail\n")
-	root, src := stagedStats(t, content)
-	logDir := t.TempDir()
+	src := planted(t, "stats.jsonl", content)
+	dst := filepath.Join(t.TempDir(), "copy.jsonl")
 
-	if err := moveCacheProgStats(root, logDir, os.Remove); err != nil {
-		t.Fatalf("moveCacheProgStats: %v", err)
+	if err := copyCacheProgStats(src, dst, createCopy); err != nil {
+		t.Fatalf("copyCacheProgStats: %v", err)
 	}
-	got, err := os.ReadFile(filepath.Join(logDir, cacheProgStatsCopyName))
-	if err != nil || !bytes.Equal(got, content) {
+	if got, err := os.ReadFile(dst); err != nil || !bytes.Equal(got, content) {
 		t.Errorf("copy = %q, %v; want %q", got, err, content)
 	}
-	mustGone(t, src)
-}
-
-// TestCacheProgStatsAbsent: a run whose cache program wrote no stats file returns nil and writes no copy.
-func TestCacheProgStatsAbsent(t *testing.T) {
-	t.Parallel()
-	logDir := t.TempDir()
-
-	if err := moveCacheProgStats(t.TempDir(), logDir, os.Remove); err != nil {
-		t.Fatalf("moveCacheProgStats with no stats file: %v", err)
-	}
-	mustGone(t, filepath.Join(logDir, cacheProgStatsCopyName))
-}
-
-// TestCacheProgStatsOversize: a file over 8 MiB is removed uncopied with an error. When that removal fails,
-// the error is returned and the file stays.
-func TestCacheProgStatsOversize(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name     string
-		remove   func(string) error
-		wantGone bool
-	}{
-		{"removed", os.Remove, true},
-		{"removal fails", func(string) error { return os.ErrPermission }, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			root, src := sparseStats(t, cacheProgStatsMaxBytes+1)
-			logDir := t.TempDir()
-
-			if err := moveCacheProgStats(root, logDir, tc.remove); err == nil {
-				t.Fatal("moveCacheProgStats over 8 MiB returned nil")
-			}
-			mustGone(t, filepath.Join(logDir, cacheProgStatsCopyName))
-			if tc.wantGone {
-				mustGone(t, src)
-			} else {
-				mustKeep(t, src)
-			}
-		})
-	}
-}
-
-// TestCacheProgStatsLimitBoundary: a file of exactly 8 MiB is copied; the limit refuses only what is over it.
-func TestCacheProgStatsLimitBoundary(t *testing.T) {
-	t.Parallel()
-	root, src := sparseStats(t, cacheProgStatsMaxBytes)
-	logDir := t.TempDir()
-
-	if err := moveCacheProgStats(root, logDir, os.Remove); err != nil {
-		t.Fatalf("moveCacheProgStats at exactly 8 MiB: %v", err)
-	}
-	info, err := os.Stat(filepath.Join(logDir, cacheProgStatsCopyName))
-	if err != nil || info.Size() != cacheProgStatsMaxBytes {
-		t.Errorf("copy = %v, %v; want %d bytes", info, err, cacheProgStatsMaxBytes)
-	}
-	mustGone(t, src)
-}
-
-// TestCacheProgStatsRemoveFailsAfterCopy: when the source cannot be removed after the copy, the copy is dropped
-// and the source is kept, so the lines are not counted twice.
-func TestCacheProgStatsRemoveFailsAfterCopy(t *testing.T) {
-	t.Parallel()
-	content := []byte("kept\n")
-	root, src := stagedStats(t, content)
-	logDir := t.TempDir()
-	var asked []string
-
-	if err := moveCacheProgStats(root, logDir, refuse(&asked)); err == nil {
-		t.Fatal("moveCacheProgStats whose removal fails returned nil")
-	}
-	if len(asked) != 1 || asked[0] != src {
-		t.Errorf("removal asked for %v, want [%s]", asked, src)
-	}
-	mustGone(t, filepath.Join(logDir, cacheProgStatsCopyName))
 	if got, err := os.ReadFile(src); err != nil || !bytes.Equal(got, content) {
 		t.Errorf("source = %q, %v; want it unchanged", got, err)
 	}
 }
 
-// TestCacheProgStatsWriteFails: a copy that cannot be created is an error; the source is not removed.
-func TestCacheProgStatsWriteFails(t *testing.T) {
-	t.Parallel()
-	root, src := stagedStats(t, []byte("kept\n"))
-	var asked []string
-
-	logDir := filepath.Join(t.TempDir(), "no-such-dir")
-	if err := moveCacheProgStats(root, logDir, refuse(&asked)); err == nil {
-		t.Fatal("moveCacheProgStats into a missing log directory returned nil")
-	}
-	if len(asked) != 0 {
-		t.Errorf("removal asked for %v after a failed copy", asked)
-	}
-	mustKeep(t, src)
-}
-
-// TestCacheProgStatsExistingCopy: an earlier copy in the log directory is never overwritten, and the source stays.
+// TestCacheProgStatsExistingCopy: a file already at dst is an error, and that file is left as it was.
 func TestCacheProgStatsExistingCopy(t *testing.T) {
 	t.Parallel()
-	root, src := stagedStats(t, []byte("new\n"))
-	logDir := t.TempDir()
-	copyPath := filepath.Join(logDir, cacheProgStatsCopyName)
+	src := planted(t, "stats.jsonl", []byte("new\n"))
 	prior := []byte("an earlier copy\n")
-	if err := os.WriteFile(copyPath, prior, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	var asked []string
+	dst := planted(t, "copy.jsonl", prior)
 
-	if err := moveCacheProgStats(root, logDir, refuse(&asked)); err == nil {
-		t.Fatal("moveCacheProgStats over an existing copy returned nil")
+	err := copyCacheProgStats(src, dst, createCopy)
+	if !errors.Is(err, fs.ErrExist) || !strings.Contains(err.Error(), dst) {
+		t.Fatalf("copyCacheProgStats over an existing file: err = %v; want an exists error naming %s", err, dst)
 	}
-	if len(asked) != 0 {
-		t.Errorf("removal asked for %v over an existing copy", asked)
+	if got, rerr := os.ReadFile(dst); rerr != nil || !bytes.Equal(got, prior) {
+		t.Errorf("existing file = %q, %v; want it unchanged", got, rerr)
 	}
-	if got, err := os.ReadFile(copyPath); err != nil || !bytes.Equal(got, prior) {
-		t.Errorf("earlier copy = %q, %v; want it unchanged", got, err)
-	}
-	mustKeep(t, src)
 }
 
-// TestCacheProgStatsNotRegular: a named pipe is refused before it is read, since a read would block.
-func TestCacheProgStatsNotRegular(t *testing.T) {
+// TestCacheProgStatsFailures: a missing source, an unreadable source, a copy that cannot be created, and a
+// write or close that fails are each an error naming the path that failed, and none leaves a copy behind.
+func TestCacheProgStatsFailures(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	src := filepath.Join(root, cacheProgDirName, cacheProgStatsName)
-	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
-		t.Fatal(err)
+	src := planted(t, "stats.jsonl", []byte("kept\n"))
+	cases := []struct {
+		name     string
+		src, dst string
+		create   copyCreator
+		dstNamed bool  // the error names dst; otherwise it names src
+		want     error // nil when any error will do
+	}{
+		{"missing source", filepath.Join(t.TempDir(), "absent.jsonl"), filepath.Join(t.TempDir(), "copy"), createCopy, false, fs.ErrNotExist},
+		{"source is a directory", t.TempDir(), filepath.Join(t.TempDir(), "copy"), createCopy, false, nil},
+		{"copy cannot be created", src, filepath.Join(t.TempDir(), "no-dir", "copy"), createCopy, true, fs.ErrNotExist},
+		{"write fails", src, filepath.Join(t.TempDir(), "copy"), faultyCopy(true, false), true, errInjected},
+		{"close fails", src, filepath.Join(t.TempDir(), "copy"), faultyCopy(false, true), true, errInjected},
 	}
-	if err := syscall.Mkfifo(src, 0o600); err != nil {
-		t.Fatal(err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := copyCacheProgStats(tc.src, tc.dst, tc.create)
+			if err == nil {
+				t.Fatal("copyCacheProgStats returned nil")
+			}
+			if tc.want != nil && !errors.Is(err, tc.want) {
+				t.Errorf("err = %v; want it to wrap %v", err, tc.want)
+			}
+			named := tc.src
+			if tc.dstNamed {
+				named = tc.dst
+			}
+			if !strings.Contains(err.Error(), named) {
+				t.Errorf("err = %v; want it to name %s", err, named)
+			}
+			if _, serr := os.Lstat(tc.dst); !os.IsNotExist(serr) {
+				t.Errorf("copy %s left behind, Lstat err = %v", tc.dst, serr)
+			}
+		})
 	}
-	var asked []string
-
-	if err := moveCacheProgStats(root, t.TempDir(), refuse(&asked)); err == nil {
-		t.Fatal("moveCacheProgStats on a named pipe returned nil")
-	}
-	if len(asked) != 0 {
-		t.Errorf("removal asked for %v on a named pipe", asked)
-	}
-	mustKeep(t, src)
-}
-
-// TestCacheProgStatsNilRemove: a move without a removal is refused before any file is touched.
-func TestCacheProgStatsNilRemove(t *testing.T) {
-	t.Parallel()
-	root, src := stagedStats(t, []byte("kept\n"))
-	logDir := t.TempDir()
-
-	if err := moveCacheProgStats(root, logDir, nil); err == nil {
-		t.Fatal("moveCacheProgStats with no removal returned nil")
-	}
-	mustGone(t, filepath.Join(logDir, cacheProgStatsCopyName))
-	mustKeep(t, src)
 }
