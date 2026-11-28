@@ -145,6 +145,9 @@ type clusterRenderFlags struct {
 	// requests.cpu. The flag defaults it to 1 core; an explicit empty value renders
 	// no request, and the gateway carries no limit either way.
 	bdGatewayCPURequest string
+	// dashboardCPURequest is the dashboard container's CPU request, written as its
+	// requests.cpu with no limit; empty renders no request, as the dashboard did before.
+	dashboardCPURequest string
 	daemonClaudeDir     string
 	tracker             bool
 	trackerDSNSecret    string
@@ -355,6 +358,8 @@ func init() {
 		"the bd gateway's pod count, one or two; two pods serve from one Service and share its claims, one serving while the other rolls (gt-yz0s8v); a rehearsal renders no gateway, so the count reaches only a live render; a count below zero or above two is refused")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.bdGatewayCPURequest, "bd-gateway-cpu-request", "1",
 		"the bd gateway container's CPU request, whole cores or millicores such as 4 or 500m, with no CPU limit so the gateway is Burstable and not throttled under contention; defaults to 1, an explicit empty value renders no request; a value that is not whole cores or millicores is refused")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.dashboardCPURequest, "dashboard-cpu-request", "",
+		"the dashboard container's CPU request, whole cores or millicores such as 2 or 100m, with no CPU limit so the dashboard is Burstable; empty, the default, renders no request; a value that is not whole cores or millicores is refused")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRender.includeStatic, "include-static", false,
 		"also write the static control-cluster manifests deploy/k8s embeds, after the ServiceAccount, so one command writes one desired set; a static Secret is written as its reviewed document and gets no create line")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.record, "record-flags", false,
@@ -508,6 +513,7 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 		{"tracker-backup-image", &f.trackerBackupImage, r.trackerBackupImage},
 		{"daemon-bd-gateway-url", &f.daemonBdGatewayURL, r.daemonBdGatewayURL},
 		{"bd-gateway-cpu-request", &f.bdGatewayCPURequest, r.bdGatewayCPURequest},
+		{"dashboard-cpu-request", &f.dashboardCPURequest, r.dashboardCPURequest},
 		{"cluster", &f.cluster, r.cluster},
 		{"sbx-manifests", &f.sbxManifests, r.sbxManifests},
 		{"sbx-chart", &f.sbxChart, r.sbxChart},
@@ -902,6 +908,7 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		TrackerBackupImage:      strings.TrimSpace(f.trackerBackupImage),
 		DaemonBdGatewayURL:      strings.TrimSpace(f.daemonBdGatewayURL),
 		BdGatewayCPURequest:     strings.TrimSpace(f.bdGatewayCPURequest),
+		DashboardCPURequest:     strings.TrimSpace(f.dashboardCPURequest),
 	}
 	if !f.rehearsal {
 		// The live pod's arguments equal the live compose command's: the om token
