@@ -87,6 +87,9 @@ const (
 	// KindHostForgejo: the town's Forgejo has not answered its health endpoint
 	// for several heartbeats in a row (gt-gg9hv.36).
 	KindHostForgejo Kind = "host-forgejo"
+	// KindHostForgejoBackup: the last verified Forgejo dump failed, none has
+	// been recorded, or it is over 26 hours old (gt-q8nbzp).
+	KindHostForgejoBackup Kind = "host-forgejo-backup"
 	// KindHostProbe: a host probe (disk, memory, docker or Forgejo health)
 	// failed, so its rule could not be judged this tick.
 	KindHostProbe Kind = "host-probe"
@@ -296,7 +299,7 @@ func Kinds() []Kind {
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
 		KindTierSweepStarved, KindTierSweepStuck, KindTierSweepGuardUnreadable,
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
-		KindHostDisk, KindHostNodeDisk, KindHostMem, KindHostGoCacheTrim, KindHostForgejo, KindHostProbe,
+		KindHostDisk, KindHostNodeDisk, KindHostMem, KindHostGoCacheTrim, KindHostForgejo, KindHostForgejoBackup, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
