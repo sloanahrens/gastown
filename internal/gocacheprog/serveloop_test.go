@@ -244,3 +244,126 @@ func TestServeSession(t *testing.T) {
 		t.Errorf("stored entry = %+v, want %+v", got, wantEntry)
 	}
 }
+
+// parallelWait bounds every wait on a signal another goroutine must send.
+const parallelWait = 10 * time.Second
+
+// settle returns the first value on ch, failing the test when none arrives
+// within parallelWait.
+func settle[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(parallelWait): //testpolicy:allow no-sleep — a hang guard: another goroutine sends on ch, so this fires only when it never arrives
+		t.Fatalf("waiting for %s: nothing within %s", what, parallelWait)
+	}
+	var zero T
+	return zero
+}
+
+// hit is the entry heldStore answers with.
+var hit = gocacheprog.Entry{OutputID: []byte("x"), Size: 3, DiskPath: "/store/x"}
+
+// heldStore holds every get whose action ID is hold until release, answers the
+// rest at once, counts the gets it received, and counts the held gets it finished.
+type heldStore struct {
+	hold    string
+	started chan struct{}
+	release chan struct{}
+
+	mu   sync.Mutex
+	gets int
+	done int
+}
+
+func (s *heldStore) Get(actionID []byte) (gocacheprog.Entry, error) {
+	s.mu.Lock()
+	s.gets++
+	s.mu.Unlock()
+	if string(actionID) != s.hold {
+		return hit, nil
+	}
+	s.started <- struct{}{}
+	select {
+	case <-s.release:
+	case <-time.After(parallelWait): //testpolicy:allow no-sleep — a hang guard: the test releases the get, so this fires only when it never does
+		return gocacheprog.Entry{}, errors.New("heldStore: the held get was never released")
+	}
+	s.mu.Lock()
+	s.done++
+	s.mu.Unlock()
+	return hit, nil
+}
+
+func (s *heldStore) Put(_, outputID, _ []byte) (string, error) {
+	return "/store/" + string(outputID), nil
+}
+
+func (s *heldStore) Close() error {
+	return nil
+}
+
+func (s *heldStore) counts() (gets, done int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gets, s.done
+}
+
+// servedRun is what serve reports once Serve returns: its error, and how many
+// gets the held store had finished at that moment.
+type servedRun struct {
+	err      error
+	finished int
+}
+
+// serve starts Serve in the background and returns the channel its result
+// arrives on. stop unblocks every channel the test holds Serve at, and the
+// cleanup waits for Serve to return before the test ends.
+func serve(t *testing.T, in io.Reader, out io.Writer, store *heldStore, stop func()) <-chan servedRun {
+	t.Helper()
+	done := make(chan servedRun, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		_, err := gocacheprog.Serve(context.Background(), in, out, store)
+		_, finished := store.counts()
+		done <- servedRun{err: err, finished: finished}
+	}()
+	t.Cleanup(func() {
+		stop()
+		select {
+		case <-exited:
+		case <-time.After(parallelWait): //testpolicy:allow no-sleep — a hang guard: stop unblocks Serve, so this fires only when Serve never returns
+			t.Errorf("Serve did not return after its stops were released")
+		}
+	})
+	return done
+}
+
+func TestServeParallelHeldGetThenBadLine(t *testing.T) {
+	t.Parallel()
+	store := &heldStore{hold: "a", started: make(chan struct{}, 1), release: make(chan struct{})}
+	// The get is held, and the input then holds a line that is not a request.
+	in := `{"ID":1,"Command":"get","ActionID":"YQ=="}` + "\n" +
+		"not a request\n"
+	var buf strings.Builder
+	release := sync.OnceFunc(func() { close(store.release) })
+	done := serve(t, strings.NewReader(in), &buf, store, release)
+	settle(t, store.started, "the held get must start")
+	release()
+	run := settle(t, done, "Serve must return")
+	if run.err == nil || !strings.Contains(run.err.Error(), "malformed") {
+		t.Fatalf("Serve = %v, want the malformed request error", run.err)
+	}
+	if run.finished != 1 {
+		t.Errorf("store had finished %d gets when Serve returned, want the held get finished (1)", run.finished)
+	}
+	got := decodeResponses(t, buf.String())
+	if len(got) != 2 || !reflect.DeepEqual(got[0], handshake) {
+		t.Fatalf("responses = %+v, want the handshake and the hit", got)
+	}
+	if resp := got[1]; resp.ID != 1 || resp.Miss || string(resp.OutputID) != "x" || resp.Size != 3 {
+		t.Errorf("response = %+v, want the whole hit x for ID 1", resp)
+	}
+}
