@@ -56,6 +56,36 @@ func (f faultyFile) Close() error {
 	return err
 }
 
+// stuckCopy is a copy whose write fails after it has turned the copy into a non-empty directory, so dropping
+// the copy after the failed write cannot remove it.
+func stuckCopy() copyCreator {
+	return func(name string) (io.WriteCloser, error) {
+		f, err := createCopy(name)
+		if err != nil {
+			return nil, err
+		}
+		return stuckFile{f, name}, nil
+	}
+}
+
+type stuckFile struct {
+	io.WriteCloser
+	dst string
+}
+
+func (f stuckFile) Write([]byte) (int, error) {
+	if err := os.Remove(f.dst); err != nil {
+		return 0, err
+	}
+	if err := os.Mkdir(f.dst, 0o755); err != nil {
+		return 0, err
+	}
+	if err := os.WriteFile(filepath.Join(f.dst, "held"), nil, 0o644); err != nil {
+		return 0, err
+	}
+	return 0, errInjected
+}
+
 // TestCacheProgStatsCopy: the copy holds the source's bytes, and the source is left as it was.
 func TestCacheProgStatsCopy(t *testing.T) {
 	t.Parallel()
@@ -129,5 +159,17 @@ func TestCacheProgStatsFailures(t *testing.T) {
 				t.Errorf("copy %s left behind, Lstat err = %v", tc.dst, serr)
 			}
 		})
+	}
+}
+
+// TestCacheProgStatsDropFails: when a failed write's copy cannot be dropped, the error reports both failures.
+func TestCacheProgStatsDropFails(t *testing.T) {
+	t.Parallel()
+	src := planted(t, "stats.jsonl", []byte("kept\n"))
+	dst := filepath.Join(t.TempDir(), "copy")
+
+	err := copyCacheProgStats(src, dst, stuckCopy())
+	if !errors.Is(err, errInjected) || !strings.Contains(err.Error(), "dropping the copy "+dst) {
+		t.Fatalf("copyCacheProgStats with an undroppable copy: err = %v; want the write failure and a drop error naming %s", err, dst)
 	}
 }
