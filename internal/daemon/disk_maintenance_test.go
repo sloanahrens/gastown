@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/jonboulle/clockwork"
@@ -904,6 +905,10 @@ func TestDiskMaintAlertOnlyIsSpacedAndSharesTheClock(t *testing.T) {
 // past the spacing (gt-gg9hv.53).
 func TestDiskMaintAlertOnlySingleFlight(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testDiskMaintAlertOnlySingleFlight)
+}
+
+func testDiskMaintAlertOnlySingleFlight(t *testing.T) {
 	h := newDiskMaintAlertOnly(t)
 	blocked := &blockedNotifier{Notifier: h.f.notify, entered: make(chan struct{}), release: make(chan struct{})}
 	h.d.notifier = blocked
@@ -911,7 +916,7 @@ func TestDiskMaintAlertOnlySingleFlight(t *testing.T) {
 	lines := &logLineCounter{}
 	h.d.logger = log.New(lines, "", 0)
 	release := sync.OnceFunc(func() { close(blocked.release) })
-	t.Cleanup(release)
+	t.Cleanup(release) // runs inside the bubble, before synctest.Test returns
 	var pending []func()
 	h.d.diskMaint.dispatch = func(fn func()) { pending = append(pending, fn) }
 
@@ -1157,7 +1162,7 @@ func alertTurns(t *testing.T, noGate bool) (rec *notifyfake.Recorder, most int32
 	first := make(chan struct{})
 	hold := make(chan struct{})
 	release := sync.OnceFunc(func() { close(hold) })
-	t.Cleanup(release)
+	t.Cleanup(release) // runs inside the bubble, before synctest.Test returns
 	var reads, inFlight, peak atomic.Int32
 	d.diskMaint.readDisks = func(context.Context) []disks.Reading {
 		n := reads.Add(1)
@@ -1228,6 +1233,10 @@ func alertTurns(t *testing.T, noGate bool) (rec *notifyfake.Recorder, most int32
 // decided (gt-gg9hv.48).
 func TestDiskMaintAlertApplicationsRunOneAfterAnother(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testDiskMaintAlertApplicationsRunOneAfterAnother)
+}
+
+func testDiskMaintAlertApplicationsRunOneAfterAnother(t *testing.T) {
 	rec, peak := alertTurns(t, false)
 	if peak != 1 {
 		t.Errorf("%d disk reads in flight at once, want 1: the applications overlapped", peak)
@@ -1244,6 +1253,10 @@ func TestDiskMaintAlertApplicationsRunOneAfterAnother(t *testing.T) {
 // granted its turn at once must see the two reads overlap (gt-gg9hv.48).
 func TestDiskMaintAlertTurnTestDetectsAMissingGate(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testDiskMaintAlertTurnTestDetectsAMissingGate)
+}
+
+func testDiskMaintAlertTurnTestDetectsAMissingGate(t *testing.T) {
 	if _, peak := alertTurns(t, true); peak <= 1 {
 		t.Fatalf("%d disk reads in flight with the gate removed; the ordering test cannot detect a missing gate", peak)
 	}
@@ -1277,6 +1290,10 @@ func (n *blockedNotifier) Escalate(ctx context.Context, e notify.Escalation) err
 // (gt-gg9hv.48).
 func TestDiskMaintBlockedNotifierDoesNotHoldTheTrim(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testDiskMaintBlockedNotifierDoesNotHoldTheTrim)
+}
+
+func testDiskMaintBlockedNotifierDoesNotHoldTheTrim(t *testing.T) {
 	d, _, f := diskMaintTestDaemon(t)
 	blocked := &blockedNotifier{Notifier: f.notify, entered: make(chan struct{}), release: make(chan struct{})}
 	d.notifier = blocked
@@ -1290,7 +1307,7 @@ func TestDiskMaintBlockedNotifierDoesNotHoldTheTrim(t *testing.T) {
 	var passes []func()
 	d.diskMaint.dispatch = func(fn func()) { passes = append(passes, fn) }
 	release := sync.OnceFunc(func() { close(blocked.release) })
-	t.Cleanup(release)
+	t.Cleanup(release) // runs inside the bubble, before synctest.Test returns
 
 	d.runDiskMaintenance()
 	if len(passes) != 1 {
@@ -1316,6 +1333,10 @@ func TestDiskMaintBlockedNotifierDoesNotHoldTheTrim(t *testing.T) {
 // pass of its own (gt-gg9hv.48).
 func TestDiskMaintBlockedNotifierKeepsNoLaterTrimOff(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testDiskMaintBlockedNotifierKeepsNoLaterTrimOff)
+}
+
+func testDiskMaintBlockedNotifierKeepsNoLaterTrimOff(t *testing.T) {
 	d, _, f := diskMaintTestDaemon(t)
 	blocked := &blockedNotifier{Notifier: f.notify, entered: make(chan struct{}), release: make(chan struct{})}
 	d.notifier = blocked
@@ -1337,7 +1358,7 @@ func TestDiskMaintBlockedNotifierKeepsNoLaterTrimOff(t *testing.T) {
 	var passes []func()
 	d.diskMaint.dispatch = func(fn func()) { passes = append(passes, fn) }
 	release := sync.OnceFunc(func() { close(blocked.release) })
-	t.Cleanup(release)
+	t.Cleanup(release) // runs inside the bubble, before synctest.Test returns
 
 	d.runDiskMaintenance() // the first trim pass: its alert blocks in the notifier
 	if len(passes) != 1 {
@@ -1470,6 +1491,10 @@ func TestDiskMaintCombinedPassGoesOnWhenTheTurnIsNotGranted(t *testing.T) {
 // targets due for the next tick (gt-gg9hv.54).
 func TestDiskMaintCombinedPassEndsWhenItsContextEndsWhileWaitingForTheTurn(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testDiskMaintCombinedPassEndsWhenItsContextEndsWhileWaitingForTheTurn)
+}
+
+func testDiskMaintCombinedPassEndsWhenItsContextEndsWhileWaitingForTheTurn(t *testing.T) {
 	d, logs, f := diskMaintTestDaemon(t)
 	countCacheTrims(d)
 	var reads atomic.Int32
@@ -1565,6 +1590,10 @@ func (*diskMaintNoSleepClock) Sleep(time.Duration) {}
 // send runs under the pass's context, not context.Background() (gt-gg9hv.54).
 func TestDiskMaintPassCancelAbandonsABlockedAlertSend(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testDiskMaintPassCancelAbandonsABlockedAlertSend)
+}
+
+func testDiskMaintPassCancelAbandonsABlockedAlertSend(t *testing.T) {
 	d, _, f := diskMaintTestDaemon(t)
 	countCacheTrims(d)
 	f.readings = []disks.Reading{{Name: "colima", UsedPct: 88}}
