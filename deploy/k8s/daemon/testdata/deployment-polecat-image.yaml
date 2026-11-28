@@ -38,10 +38,10 @@ spec:
             - TCP:192.168.5.2:5001
           resources:
             requests:
-              cpu: 10m
+              cpu: 100m
               memory: 64Mi
             limits:
-              cpu: 10m
+              cpu: 100m
               memory: 64Mi
           restartPolicy: Always
         - name: gateway-proxy
@@ -51,10 +51,10 @@ spec:
             - TCP:192.168.5.2:28443
           resources:
             requests:
-              cpu: 10m
+              cpu: 250m
               memory: 64Mi
             limits:
-              cpu: 10m
+              cpu: 250m
               memory: 64Mi
           restartPolicy: Always
       containers:

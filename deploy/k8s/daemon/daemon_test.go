@@ -612,8 +612,8 @@ func TestTrackerDeployment(t *testing.T) {
 	if relay.RestartPolicy != "Always" {
 		t.Errorf("the relay restartPolicy = %q, want Always, so the kubelet stops it after trackerd exits", relay.RestartPolicy)
 	}
-	if relay.Resources == nil || !maps.Equal(relay.Resources.Requests, proxyResourceList()) || !maps.Equal(relay.Resources.Limits, proxyResourceList()) {
-		t.Errorf("the relay resources = %+v, want requests and limits equal to %v", relay.Resources, proxyResourceList())
+	if relay.Resources == nil || !maps.Equal(relay.Resources.Requests, proxyResourceList(proxyCPU)) || !maps.Equal(relay.Resources.Limits, proxyResourceList(proxyCPU)) {
+		t.Errorf("the relay resources = %+v, want requests and limits equal to %v", relay.Resources, proxyResourceList(proxyCPU))
 	}
 
 	labels := dep.Spec.Template.Metadata.Labels
@@ -1317,9 +1317,10 @@ func TestProxySidecars(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		port int
+		cpu  string
 	}{
-		{RegistryProxyContainer, RegistryProxyPort},
-		{GatewayProxyContainer, GatewayProxyPort},
+		{RegistryProxyContainer, RegistryProxyPort, defaultRegistryProxyCPU},
+		{GatewayProxyContainer, GatewayProxyPort, defaultGatewayProxyCPU},
 	} {
 		c, ok := byName[tc.name]
 		if !ok {
@@ -1341,8 +1342,8 @@ func TestProxySidecars(t *testing.T) {
 		if c.Resources == nil {
 			t.Fatalf("%s carries no resources, want the fixed share", tc.name)
 		}
-		if want := (map[string]string{"cpu": proxyCPU, "memory": proxyMemory}); !maps.Equal(c.Resources.Requests, want) {
-			t.Errorf("%s requests = %v, want the fixed share %v", tc.name, c.Resources.Requests, want)
+		if want := (map[string]string{"cpu": tc.cpu, "memory": proxyMemory}); !maps.Equal(c.Resources.Requests, want) {
+			t.Errorf("%s requests = %v, want the share %v", tc.name, c.Resources.Requests, want)
 		}
 		if !maps.Equal(c.Resources.Requests, c.Resources.Limits) {
 			t.Errorf("%s requests %v and limits %v; requests equal limits", tc.name, c.Resources.Requests, c.Resources.Limits)
@@ -1391,6 +1392,64 @@ func TestProxySidecars(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Values.HostGatewayIP") {
 		t.Errorf("Build refused with %q, want Values.HostGatewayIP named", err)
+	}
+}
+
+// TestRelayCPUShares holds the daemon pod's two relay CPU shares: with the Values
+// fields empty gateway-proxy asks and is limited to 250m and registry-proxy to
+// 100m, a set field carries its own figure in requests and limits, and a value
+// cpuRE does not read is refused naming the field, with or without a relay
+// rendered (gt-j9kj8y).
+func TestRelayCPUShares(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		setup func(*Values)
+		want  map[string]string
+	}{
+		{"defaults", func(*Values) {}, map[string]string{
+			GatewayProxyContainer: "250m", RegistryProxyContainer: "100m"}},
+		{"set", func(v *Values) { v.GatewayProxyCPU, v.RegistryProxyCPU = "1", "500m" },
+			map[string]string{GatewayProxyContainer: "1", RegistryProxyContainer: "500m"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := goldenValues(t)
+			tc.setup(&v)
+			byName := make(map[string]Container)
+			for _, c := range mustBuild(t, v).Deployment.Spec.Template.Spec.InitContainers {
+				byName[c.Name] = c
+			}
+			for name, cpu := range tc.want {
+				c, ok := byName[name]
+				if !ok || c.Resources == nil {
+					t.Fatalf("the pod carries no %s relay with resources", name)
+				}
+				want := map[string]string{"cpu": cpu, "memory": proxyMemory}
+				if !maps.Equal(c.Resources.Requests, want) || !maps.Equal(c.Resources.Limits, want) {
+					t.Errorf("%s share = %v/%v, want %v in both requests and limits", name, c.Resources.Requests, c.Resources.Limits, want)
+				}
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		field string
+		set   func(*Values)
+	}{
+		{"Values.GatewayProxyCPU", func(v *Values) { v.GatewayProxyCPU = "0.25" }},
+		{"Values.RegistryProxyCPU", func(v *Values) { v.RegistryProxyCPU = "0.25" }},
+	} {
+		for _, noRelay := range []bool{false, true} {
+			v := goldenValues(t)
+			if noRelay {
+				v.ProxyImage = ""
+			}
+			tc.set(&v)
+			if _, err := Build(v); err == nil || !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("Build with %s = 0.25 and noRelay=%v = %v, want a refusal naming the field", tc.field, noRelay, err)
+			}
+		}
 	}
 }
 

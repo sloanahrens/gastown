@@ -505,12 +505,20 @@ const (
 	GatewayProxyContainer  = "gateway-proxy"
 	RegistryProxyPort      = 5001
 	GatewayProxyPort       = 28443
-	// proxyCPU and proxyMemory are each sidecar's share. A socat relay holds no
-	// state, so the figures are small and fixed; requests equal limits, as the
-	// daemon container's do, so the scheduler promises the share instead of
-	// letting it burst into a neighbor.
+	// proxyMemory is every relay's memory share; proxyCPU is the tracker-relay
+	// sidecar's share, which stays 10m because that relay is in another pod and
+	// nobody has read its throttle counters. The daemon pod's two relays take
+	// Values.GatewayProxyCPU and Values.RegistryProxyCPU, defaulting to the two
+	// constants below: this 10m throttled the gateway relay in 86 percent of
+	// periods while it used 21.4 core-seconds (gt-j9kj8y), and the figures are a
+	// first size, since throttled use shows average demand only, not the burst.
+	// Requests equal limits, so each relay's share is promised, not burst.
 	proxyCPU    = "10m"
 	proxyMemory = "64Mi"
+	// defaultGatewayProxyCPU and defaultRegistryProxyCPU are the daemon pod's two
+	// relay CPU shares when their Values field is empty.
+	defaultGatewayProxyCPU  = "250m"
+	defaultRegistryProxyCPU = "100m"
 	// DoltBackupPath is where the compose file mounts the host's Dolt backups.
 	// The pod mounts the same path: the dolt-backup claim, or the host directory
 	// DoltBackupHostPath names. GT_DOLT_BACKUP_ROOT names it in the live pod.
@@ -733,6 +741,15 @@ type Values struct {
 	// would name no host. A rehearsal never renders the relays, whatever this
 	// field holds, but still refuses a tag.
 	ProxyImage string
+	// GatewayProxyCPU and RegistryProxyCPU are the two relay sidecars' CPU
+	// shares, whole cores or millicores as cpuRE reads them, such as 250m. Empty
+	// takes defaultGatewayProxyCPU (250m) and defaultRegistryProxyCPU (100m), the
+	// figures that replace the 10m share which throttled the gateway relay in 86
+	// percent of periods (gt-j9kj8y). A value cpuRE does not read is refused,
+	// naming the field, with or without ProxyImage. Each relay keeps requests
+	// equal to limits, so its share is promised rather than burst.
+	GatewayProxyCPU  string
+	RegistryProxyCPU string
 	// PolecatImage is the sandbox image of the daemon's pair, by digest: repo@sha256:
 	// <64 lowercase hex>, as ProxyImage is, since a tag would name whatever the
 	// registry holds at pull time. Set, the pod template carries it as the
@@ -1409,15 +1426,16 @@ func proxyContainers(v Values) []Container {
 		return nil
 	}
 	return []Container{
-		proxyContainer(RegistryProxyContainer, v.ProxyImage, v.HostGatewayIP, RegistryProxyPort),
-		proxyContainer(GatewayProxyContainer, v.ProxyImage, v.HostGatewayIP, GatewayProxyPort),
+		proxyContainer(RegistryProxyContainer, v.ProxyImage, v.HostGatewayIP, RegistryProxyPort, v.RegistryProxyCPU),
+		proxyContainer(GatewayProxyContainer, v.ProxyImage, v.HostGatewayIP, GatewayProxyPort, v.GatewayProxyCPU),
 	}
 }
 
-// proxyContainer is one relay: its socat addresses, the same fixed share every
-// relay carries, and no volume or environment of its own. It is a native sidecar,
-// restartPolicy Always, so the kubelet stops it after the daemon container.
-func proxyContainer(name, image, host string, port int) Container {
+// proxyContainer is one relay: its socat addresses, the CPU share its Values
+// field gives it (or the default), and no volume or environment of its own. It is
+// a native sidecar, restartPolicy Always, so the kubelet stops it after the
+// daemon container.
+func proxyContainer(name, image, host string, port int, cpu string) Container {
 	return Container{
 		Name:  name,
 		Image: image,
@@ -1426,8 +1444,8 @@ func proxyContainer(name, image, host string, port int) Container {
 			fmt.Sprintf("TCP:%s:%d", host, port),
 		},
 		Resources: &ContainerResources{
-			Requests: proxyResourceList(),
-			Limits:   proxyResourceList(),
+			Requests: proxyResourceList(cpu),
+			Limits:   proxyResourceList(cpu),
 		},
 		RestartPolicy: "Always",
 	}
@@ -1435,8 +1453,8 @@ func proxyContainer(name, image, host string, port int) Container {
 
 // proxyResourceList is one relay's share; each call builds its own map, so
 // requests and limits never share one.
-func proxyResourceList() map[string]string {
-	return map[string]string{"cpu": proxyCPU, "memory": proxyMemory}
+func proxyResourceList(cpu string) map[string]string {
+	return map[string]string{"cpu": cpu, "memory": proxyMemory}
 }
 
 // daemonContainer is the daemon's container. Its arguments are the live compose
@@ -1906,8 +1924,8 @@ func trackerRelayContainer(v Values) Container {
 			fmt.Sprintf("TCP:127.0.0.1:%d", TrackerListenPort),
 		},
 		Resources: &ContainerResources{
-			Requests: proxyResourceList(),
-			Limits:   proxyResourceList(),
+			Requests: proxyResourceList(proxyCPU),
+			Limits:   proxyResourceList(proxyCPU),
 		},
 		RestartPolicy: "Always",
 	}
@@ -2342,6 +2360,12 @@ func (v Values) withDefaults() Values {
 	if v.TerminationGraceSeconds == 0 {
 		v.TerminationGraceSeconds = DefaultTerminationGraceSeconds
 	}
+	if v.GatewayProxyCPU == "" {
+		v.GatewayProxyCPU = defaultGatewayProxyCPU
+	}
+	if v.RegistryProxyCPU == "" {
+		v.RegistryProxyCPU = defaultRegistryProxyCPU
+	}
 	// A rehearsal runs beside the live pod and mounts no live credential
 	// (validateRehearsal), so its cloud check key and DeepSeek balance key are
 	// never mounted.
@@ -2677,13 +2701,21 @@ func (v Values) validateImage() error {
 	return nil
 }
 
-// validateProxies refuses a proxy image that is not a digest, and a proxy image
-// on a live pod with no gateway address: a relay would listen on 127.0.0.1 and
-// have no host to forward to. A tag is refused wherever it is set, a rehearsal
-// included, so a wrong value is never silently ignored; the gateway is required
-// only where the relays render, so a rehearsal carrying a proxy image still
-// renders with none.
+// validateProxies refuses a relay CPU share cpuRE does not read, a proxy image
+// that is not a digest, and a proxy image on a live pod with no gateway address:
+// a relay would listen on 127.0.0.1 and have no host to forward to. A CPU share
+// and a tag are refused wherever they are set, a rehearsal included, so a wrong
+// value is never silently ignored; the gateway is required only where the relays
+// render, so a rehearsal carrying a proxy image still renders with none.
 func (v Values) validateProxies() error {
+	for _, f := range []struct{ name, value string }{
+		{"GatewayProxyCPU", v.GatewayProxyCPU},
+		{"RegistryProxyCPU", v.RegistryProxyCPU},
+	} {
+		if f.value != "" && !cpuRE.MatchString(f.value) {
+			return fmt.Errorf("Values.%s %q: want a positive whole number of cores or millicores, such as 250m or 1", f.name, f.value)
+		}
+	}
 	if v.ProxyImage == "" {
 		return nil
 	}
