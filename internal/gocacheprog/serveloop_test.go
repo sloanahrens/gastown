@@ -396,27 +396,31 @@ func (g *gateReader) Read(p []byte) (int, error) {
 func TestServeParallelWriteErrorStartsNoRequest(t *testing.T) {
 	t.Parallel()
 	store := &heldStore{hold: "a", started: make(chan struct{}, 1), release: make(chan struct{})}
-	// The first request is held in the store. The second waits behind gate, and
-	// the test does not open gate before Serve returns: a Serve that reads on
-	// reaches the gate and returns a read error instead of the write error.
+	// The first get is held in the store. The second is answered at once, and its
+	// response write fails. The third waits behind gate, which the test opens only
+	// after that write has failed: a Serve that reads on and starts it has no
+	// write-error check after the read, and so gets three.
 	gate := make(chan struct{})
 	in := io.MultiReader(
-		strings.NewReader(`{"ID":1,"Command":"get","ActionID":"YQ=="}`+"\n"),
-		&gateReader{gate: gate, inner: strings.NewReader(`{"ID":2,"Command":"get","ActionID":"Yg=="}` + "\n")},
+		strings.NewReader(`{"ID":1,"Command":"get","ActionID":"YQ=="}`+"\n"+`{"ID":2,"Command":"get","ActionID":"Yg=="}`+"\n"),
+		&gateReader{gate: gate, inner: strings.NewReader(`{"ID":3,"Command":"get","ActionID":"Yw=="}` + "\n")},
 	)
 	out := &failWriter{n: 1, err: errors.New("pipe closed"), failed: make(chan struct{}, 1)}
 	openGate := sync.OnceFunc(func() { close(gate) })
 	release := sync.OnceFunc(func() { close(store.release) })
 	done := serve(t, in, out, store, func() { openGate(); release() })
 	settle(t, store.started, "the held get must start")
+	settle(t, out.failed, "the second get's response write must fail")
+	openGate()
+	// Serve returns only once the held get has finished, so the test releases it
+	// here and reads the counts from that return.
 	release()
-	settle(t, out.failed, "the held get's response write must fail")
 	run := settle(t, done, "Serve must return")
 	if run.err == nil || !strings.Contains(run.err.Error(), "pipe closed") {
 		t.Fatalf("Serve = %v, want the write error", run.err)
 	}
-	if gets, _ := store.counts(); gets != 1 || run.finished != 1 {
-		t.Errorf("store saw %d gets and finished %d when Serve returned, want the one held get started and finished", gets, run.finished)
+	if gets, _ := store.counts(); gets != 2 || run.finished != 1 {
+		t.Errorf("store saw %d gets and finished %d when Serve returned, want the two read and the one in flight finished", gets, run.finished)
 	}
 	if got := decodeResponses(t, out.buf.String()); !reflect.DeepEqual(got, []gocacheprog.Response{handshake}) {
 		t.Errorf("responses = %+v, want the handshake only", got)
