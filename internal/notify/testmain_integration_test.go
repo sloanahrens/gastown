@@ -16,7 +16,7 @@ import (
 // successful sends by what they leave in a town's beads. Without the
 // container the tier fails; it does not pass vacuously.
 func TestMain(m *testing.M) {
-	h, err := testutil.StartHermetic(testutil.WithDolt())
+	h, err := testutil.StartHermetic(testutil.WithDolt(), testutil.WithDoltPoolInits(16))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "notify integration TestMain: %v\n", err)
 		os.Exit(1)

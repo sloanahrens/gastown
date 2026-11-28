@@ -29,8 +29,9 @@ import (
 // doltPoolInits is the default for doltPoolInitSetting: the number of template
 // databases the pool holds for bd inits. A lease beyond them gets one of the
 // pool's spare databases, migrated by bd init itself, as every bd init did
-// before the template; it bounds leases at once, not a run's use.
-const doltPoolInits = 24
+// before the template; it bounds leases at once, not a run's use. A package
+// that holds many leases at once declares its count with WithDoltPoolInits.
+const doltPoolInits = 2
 
 // doltPoolSetting holds how many template databases a pool lays out. The
 // package value starts at doltPoolInits; SetDoltPoolInits sets it. A test
