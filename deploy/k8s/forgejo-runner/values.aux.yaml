@@ -1,0 +1,27 @@
+# The Values the aux forgejo-runner is built from, decoded by AuxValues with the same
+# strict decoder as values.control.yaml: a key Values does not have is refused, and
+# so is a second document. It holds a name, labels, an address and sizes, and no
+# credential.
+name: forgejo-runner-aux
+namespace: forgejo
+# One job at a time: this runner takes only the ci-aux label.
+capacity: 1
+labels:
+  - "ci-aux:docker://ci-base:latest"
+# The same host gateway the control runner's forgejo alias resolves to.
+forgejoHostIP: "10.43.130.32"
+dindStorage: 20Gi
+runnerStorage: 1Gi
+# The runner container has no request below its limit, so it asks for its whole
+# 200m and 256Mi. The engine asks for 500m and 2Gi of its 4 cores and 6Gi limit, so
+# this pod requests 700m and 2304Mi, and a tier sweep's preflight still fits beside
+# both runners (read 2026-11-27).
+runnerResources:
+  cpu: "200m"
+  memory: 256Mi
+dindResources:
+  cpu: "4"
+  memory: 6Gi
+dindRequests:
+  cpu: "500m"
+  memory: 2Gi
