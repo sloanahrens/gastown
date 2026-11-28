@@ -29,6 +29,7 @@ type Journal struct {
 	path   string
 	f      *os.File
 	unlock func()
+	now    func() time.Time
 	closed bool
 }
 
@@ -61,7 +62,7 @@ func openJournalAt(path string, now func() time.Time) (*Journal, error) {
 	if err == nil && !ok {
 		err = lock.ErrFlockHeld
 	}
-	j := &Journal{path: path, f: f, unlock: unlock}
+	j := &Journal{path: path, f: f, unlock: unlock, now: now}
 	if err == nil {
 		err = j.write(Record{Op: opStart, Time: now()})
 	}
@@ -116,6 +117,35 @@ func openJournalNamedWith(path string, now func() time.Time, remove func(string)
 
 // Path returns the file this journal writes.
 func (j *Journal) Path() string { return j.path }
+
+// Put records that actionID's body of size bytes is stored under outputID.
+func (j *Journal) Put(actionID, outputID []byte, size int64) error {
+	if !validID(actionID) || !validID(outputID) {
+		return fmt.Errorf("gocacheprog: journal: action %q or output %q id is not a non-empty hex string", actionID, outputID)
+	}
+	if size < 0 {
+		return fmt.Errorf("gocacheprog: journal: size %d is negative", size)
+	}
+	return j.append(Record{Op: opPut, ActionID: string(actionID), OutputID: string(outputID), Size: size})
+}
+
+// Use records that actionID's entry was read.
+func (j *Journal) Use(actionID []byte) error {
+	if !validID(actionID) {
+		return fmt.Errorf("gocacheprog: journal: action %q is not a non-empty hex string", actionID)
+	}
+	return j.append(Record{Op: opUse, ActionID: string(actionID)})
+}
+
+// append stamps r with the clock and writes it, under the lock so that the
+// file order matches the order of the calls. After Close the write fails,
+// because the file is closed.
+func (j *Journal) append(r Record) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	r.Time = j.now()
+	return j.write(r)
+}
 
 // Close releases the lock and closes the file. A second Close returns nil.
 func (j *Journal) Close() error {

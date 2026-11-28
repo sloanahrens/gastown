@@ -2,10 +2,12 @@ package gocacheprog
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/lock"
@@ -412,5 +414,117 @@ func TestJournalExistingTmpIsRefused(t *testing.T) {
 	must(t, err)
 	if string(data) != "someone else's" {
 		t.Errorf(".tmp = %q, want it left as found", data)
+	}
+}
+
+func TestJournalRecordsReadBackInOrder(t *testing.T) {
+	t.Parallel()
+	clock := &journalClock{now: journalT0}
+	j := openTestJournal(t, clock)
+
+	clock.now = journalT0.Add(1 * time.Second)
+	must(t, j.Put([]byte("aa"), []byte("bb"), 5))
+	clock.now = journalT0.Add(2 * time.Second)
+	must(t, j.Use([]byte("aa")))
+	clock.now = journalT0.Add(3 * time.Second)
+	must(t, j.Put([]byte("cc"), []byte("dd"), 7))
+
+	want := []Record{
+		{Op: opPut, ActionID: "aa", OutputID: "bb", Size: 5, Time: journalT0.Add(1 * time.Second)},
+		{Op: opUse, ActionID: "aa", Time: journalT0.Add(2 * time.Second)},
+		{Op: opPut, ActionID: "cc", OutputID: "dd", Size: 7, Time: journalT0.Add(3 * time.Second)},
+	}
+	got, err := ReadJournal(j.Path())
+	must(t, err)
+	if !got.Live {
+		t.Error("open journal: Live = false, want true")
+	}
+	requireRecords(t, got.Records, want)
+}
+
+func TestJournalConcurrentUsesAllLand(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		j := openTestJournal(t, &journalClock{now: journalT0})
+		const workers, uses = 8, 25
+		for w := range workers {
+			go func() {
+				for i := range uses {
+					if err := j.Use([]byte(fmt.Sprintf("%02x%02x", w, i))); err != nil {
+						t.Errorf("Use: %v", err)
+					}
+				}
+			}()
+		}
+		// synctest.Wait returns once every worker has finished its uses.
+		synctest.Wait()
+		must(t, j.Close())
+		got, err := ReadJournal(j.Path())
+		must(t, err)
+		if len(got.Records) != workers*uses || got.Undecodable != 0 {
+			t.Errorf("records = %d undecodable = %d, want %d and 0", len(got.Records), got.Undecodable, workers*uses)
+		}
+	})
+}
+
+func TestJournalRefusesBadCalls(t *testing.T) {
+	t.Parallel()
+	cases := map[string]func(j *Journal) error{
+		"put with non-hex action": func(j *Journal) error { return j.Put([]byte("zz"), []byte("bb"), 1) },
+		"put with empty action":   func(j *Journal) error { return j.Put(nil, []byte("bb"), 1) },
+		"put with non-hex output": func(j *Journal) error { return j.Put([]byte("aa"), []byte("zz"), 1) },
+		"put with empty output":   func(j *Journal) error { return j.Put([]byte("aa"), nil, 1) },
+		"put with negative size":  func(j *Journal) error { return j.Put([]byte("aa"), []byte("bb"), -1) },
+		"use with empty action":   func(j *Journal) error { return j.Use(nil) },
+		"use with non-hex action": func(j *Journal) error { return j.Use([]byte("g0")) },
+	}
+	for name, call := range cases {
+		t.Run(strings.ReplaceAll(name, " ", "_"), func(t *testing.T) {
+			t.Parallel()
+			j := openTestJournal(t, &journalClock{now: journalT0})
+			if callErr := call(j); callErr == nil {
+				t.Fatal("want error")
+			}
+			must(t, j.Close())
+			got, err := ReadJournal(j.Path())
+			must(t, err)
+			if len(got.Records) != 0 {
+				t.Errorf("records = %d, want 0: a refused call must not write", len(got.Records))
+			}
+		})
+	}
+}
+
+func TestJournalRefusesCallsAfterClose(t *testing.T) {
+	t.Parallel()
+	j := openTestJournal(t, &journalClock{now: journalT0})
+	must(t, j.Put([]byte("aa"), []byte("bb"), 5))
+	must(t, j.Close())
+	if err := j.Put([]byte("cc"), []byte("dd"), 1); err == nil {
+		t.Error("Put after Close: want error")
+	}
+	if err := j.Use([]byte("aa")); err == nil {
+		t.Error("Use after Close: want error")
+	}
+	got, err := ReadJournal(j.Path())
+	must(t, err)
+	if len(got.Records) != 1 {
+		t.Errorf("records = %d, want 1: a refused call must not write", len(got.Records))
+	}
+}
+
+func TestJournalRefusesUnencodableTime(t *testing.T) {
+	t.Parallel()
+	clock := &journalClock{now: journalT0}
+	j := openTestJournal(t, clock)
+	clock.now = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := j.Use([]byte("aa")); err == nil {
+		t.Fatal("Use at a year JSON cannot encode: want error")
+	}
+	must(t, j.Close())
+	got, err := ReadJournal(j.Path())
+	must(t, err)
+	if len(got.Records) != 0 {
+		t.Errorf("records = %d, want 0: a refused line must not be written", len(got.Records))
 	}
 }
