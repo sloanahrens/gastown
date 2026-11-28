@@ -108,8 +108,8 @@ func TestMetricsShapeOutcomeUsesTheInjectedRunner(t *testing.T) {
 		}
 	}
 	repo := filepath.Join(town, ".dolt-archive", "git")
-	if want := []string{"git", "-C", repo, "log", "--first-parent", "--format=%H %cI", "--", "gt/issues.jsonl"}; !slices.Equal(calls[0], want) {
-		t.Errorf("first call = %v, want the archive log %v", calls[0], want)
+	if first := calls[0]; len(first) < 4 || first[3] != "log" || first[2] != repo {
+		t.Errorf("first call = %v, want a git log in the archive repo %s", first, repo)
 	}
 	if want := []string{"git", "-C", repo, "show", shapeSHA + ":gt/issues.jsonl"}; !slices.ContainsFunc(calls, func(argv []string) bool { return slices.Equal(argv, want) }) {
 		t.Errorf("no call read the sampled commit's issues.jsonl (%v): %v", want, calls)
@@ -126,6 +126,41 @@ func TestMetricsShapeOutcomeUsesTheInjectedRunner(t *testing.T) {
 	if strings.Join(gotRow, " ") != strings.Join(want, " ") {
 		t.Fatalf("acceptance_boxes 1 row = %v, want %v", gotRow, want)
 	}
+}
+
+// TestMetricsShapeOutcomeSamplesADayWrittenOnlyToAShard drives the sample and
+// the read of a day whose only commit touched gt/issues.2.jsonl.
+func TestMetricsShapeOutcomeSamplesADayWrittenOnlyToAShard(t *testing.T) {
+	t.Parallel()
+	env := shapeArchiveEnv{
+		Town: shapeTown(t), Rig: "gt", ReadFile: os.ReadFile,
+		Run: func(_ context.Context, argv []string) ([]byte, error) {
+			joined := strings.Join(argv, " ")
+			switch {
+			case strings.Contains(joined, " log "):
+				matched, err := filepath.Match(strings.TrimPrefix(argv[len(argv)-1], ":(glob)"), "gt/issues.2.jsonl")
+				if err != nil {
+					t.Fatalf("path spec: %v", err)
+				}
+				if !matched {
+					return nil, nil
+				}
+				return []byte(shapeSHA + " 2026-09-10T23:00:00Z\n"), nil
+			case strings.Contains(joined, " ls-tree "):
+				return []byte("gt/events.jsonl\ngt/issues.2.jsonl\n"), nil
+			case strings.HasSuffix(argv[len(argv)-1], "HEAD:gt/events.jsonl"):
+				return []byte(shapeGoodEvents), nil
+			case strings.Contains(argv[len(argv)-1], shapeSHA+":"):
+				return []byte(`{"id":"gt-a","description":"## Goal\nx","acceptance_criteria":"- [ ] a","created_at":"2026-09-10T09:00:00Z"}`), nil
+			}
+			return nil, fmt.Errorf("unexpected argv %v", argv)
+		},
+	}
+	var out bytes.Buffer
+	if err := runMetricsShapeOutcome(context.Background(), &out, env); err != nil {
+		t.Fatalf("runMetricsShapeOutcome: %v", err)
+	}
+	shapeRow(t, out.String(), "acceptance_boxes", "1")
 }
 
 // TestMetricsShapeOutcomeCountsLandedBeadsWithoutATimeToClose drives the

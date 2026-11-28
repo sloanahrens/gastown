@@ -29,10 +29,10 @@ type archiveCommit struct {
 	At  time.Time
 }
 
-// archiveSampledCommits lists the commits that touched the rig's issues.jsonl
-// and keeps one per local day, oldest first. The shape-outcome join and the
-// first-filed import share it, so their sampling cannot drift apart; each
-// caller wraps an error with its own command name.
+// archiveSampledCommits lists the commits that touched the rig's issues shards
+// (issues.jsonl or a numbered shard) and keeps one per local day, oldest first.
+// The shape-outcome join and the first-filed import share it, so their sampling
+// cannot drift apart; each caller wraps an error with its own command name.
 //
 // git log prints newest first, so the first commit seen for a day is that
 // day's last export: the most complete version of the day, and the latest
@@ -42,12 +42,13 @@ type archiveCommit struct {
 func archiveSampledCommits(ctx context.Context, run metrics.Runner, repo, rig string, dropped *metrics.Dropped) ([]archiveCommit, error) {
 	// The committer date travels beside the id in one call: pairing a second
 	// log of dates with this one by position would be a second ordering to get
-	// wrong.
+	// wrong. The glob spans issues.jsonl and every numbered shard, so a day
+	// whose writes landed in one is sampled too (rig has no ':' or '*').
 	raw, err := run(ctx, []string{
-		"git", "-C", repo, "log", "--first-parent", "--format=%H %cI", "--", rig + "/issues.jsonl",
+		"git", "-C", repo, "log", "--first-parent", "--format=%H %cI", "--", ":(glob)" + rig + "/issues*.jsonl",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", filepath.Join(repo, rig, "issues.jsonl"), err)
+		return nil, fmt.Errorf("reading %s: %w", filepath.Join(repo, rig, "issues*.jsonl"), err)
 	}
 	var sampled []archiveCommit
 	seenDay := make(map[string]bool)
