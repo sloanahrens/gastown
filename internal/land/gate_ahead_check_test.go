@@ -106,3 +106,92 @@ func TestGateAheadCheckBead(t *testing.T) {
 		})
 	}
 }
+
+// TestGateAheadCheck: a submission passing the bead, head and range checks is
+// accepted. The first check to fail returns an error naming it, the checks
+// after it do not run, and no check writes to the bead.
+func TestGateAheadCheck(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("git read failed")
+	passing := func(CommitReader, string, string) (*Rejection, error) { return nil, nil }
+	erroring := func(CommitReader, string, string) (*Rejection, error) { return nil, boom }
+	rejecting := func(CommitReader, string, string) (*Rejection, error) {
+		return &Rejection{Kind: RejectPolicy, Reason: "a forbidden trailer"}, nil
+	}
+	tests := []struct {
+		name string
+		bead func(f *landFixture)
+		head func(t *testing.T, f *landFixture, r *gateAheadHeadRepo)
+		// ranges are the lander's RangeChecks. The bead and head rows carry
+		// rejecting, so a check that ran past its failure would surface as
+		// "range check 0" and fail the row's wantErr.
+		ranges  []RangeCheck
+		wantErr string
+	}{
+		{name: "all three pass", ranges: []RangeCheck{passing}},
+		{name: "bead check error", bead: func(f *landFixture) { f.bd.FailWith("show", boom) },
+			ranges: []RangeCheck{rejecting}, wantErr: "reading bead gt-abc"},
+		{name: "bead not ready", bead: func(f *landFixture) {
+			i := gateAheadReadyIssue("gt-abc")
+			i.Labels = nil
+			f.bd.Seed(i)
+		}, ranges: []RangeCheck{rejecting}, wantErr: "has no " + LabelReadyToLand + " label"},
+		{name: "head check error", head: func(_ *testing.T, _ *landFixture, r *gateAheadHeadRepo) { r.branchFetchErr = boom },
+			ranges: []RangeCheck{rejecting}, wantErr: "fetch branch"},
+		{name: "head not on the branch", head: func(t *testing.T, f *landFixture, _ *gateAheadHeadRepo) {
+			f.git.SetRef(t, f.origin, "refs/heads/"+fixtureBranch, f.base)
+		}, ranges: []RangeCheck{rejecting}, wantErr: "not reachable"},
+		{name: "range check error", ranges: []RangeCheck{erroring},
+			wantErr: "landing failed at range check: git read failed"},
+		{name: "range check rejects", ranges: []RangeCheck{passing, rejecting},
+			wantErr: "range check 1: landing rejected (policy): a forbidden trailer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			if tt.bead != nil {
+				tt.bead(f)
+			}
+			l := f.lander()
+			l.RangeChecks = tt.ranges
+			r := &gateAheadHeadRepo{Repo: f.git.Open(f.repo)}
+			if tt.head != nil {
+				tt.head(t, f, r)
+			}
+			before := aheadBeadWrites(t, f.bd)
+			err := l.gateAheadCheck(r, f.work, f.base)
+			if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+				t.Errorf("gateAheadCheck wrote %d bead records, want 0", n)
+			}
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("gateAheadCheck = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("gateAheadCheck = %v, want an error naming %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestGateAheadCheckRangesReadBaseToHead: the range checks read the commits
+// the landing would bring on, base..head.
+func TestGateAheadCheckRangesReadBaseToHead(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	var gotBase, gotHead string
+	l.RangeChecks = []RangeCheck{func(_ CommitReader, base, head string) (*Rejection, error) {
+		gotBase, gotHead = base, head
+		return nil, nil
+	}}
+	if err := l.gateAheadCheck(f.git.Open(f.repo), f.work, f.base); err != nil {
+		t.Fatalf("gateAheadCheck = %v, want nil", err)
+	}
+	if gotBase != f.base || gotHead != f.work.Head {
+		t.Errorf("range check read %s..%s, want %s..%s", gotBase, gotHead, f.base, f.work.Head)
+	}
+}
