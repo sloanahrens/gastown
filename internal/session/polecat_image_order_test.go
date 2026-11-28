@@ -23,11 +23,11 @@ func TestPolecatImageCopiesPinnedBdBeforeGt(t *testing.T) {
 }
 
 // TestPolecatImageKeepsPerCommitCopiesAfterBd pins that the binaries that change
-// with a commit — gt, polecat-image and sweep-run — still follow the pinned bd
-// in their order, each to the same destination with its mode from the COPY
-// (gt-kgm97c).
+// with a commit — gt, polecat-image, sweep-run and gt-gocacheprog — still follow
+// the pinned bd in their order, each to the same destination with its mode from
+// the COPY (gt-kgm97c).
 //
-// Mutation: move any of the three above the bd COPY, drop one, or change its
+// Mutation: move any of the four above the bd COPY, drop one, or change its
 // destination or mode, and this goes red.
 func TestPolecatImageKeepsPerCommitCopiesAfterBd(t *testing.T) {
 	t.Parallel()
@@ -35,7 +35,7 @@ func TestPolecatImageKeepsPerCommitCopiesAfterBd(t *testing.T) {
 	bd := polecatImageCopyIndex(t, ins, "bd")
 
 	prev := bd
-	for _, bin := range []string{"gt", "polecat-image", "sweep-run"} {
+	for _, bin := range []string{"gt", "polecat-image", "sweep-run", "gt-gocacheprog"} {
 		idx := polecatImageCopyIndex(t, ins, bin)
 		if idx < prev {
 			t.Errorf("the Dockerfile copies bin/%s at instruction %d, not after the pinned bd and the per-commit binaries that precede it (last at %d): the changing binaries must stay below the pinned bd for its layer to cache", bin, idx, prev)

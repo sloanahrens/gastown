@@ -200,6 +200,10 @@ COPY --chmod=0755 bin/polecat-image /usr/local/bin/polecat-image
 # path is sweeprunner.RunnerCommand, which TestPolecatImageCopiesTheSweepRunner
 # keeps equal to this COPY's target.
 COPY --chmod=0755 bin/sweep-run /usr/local/bin/sweep-run
+# The Go cache program (cmd/gt-gocacheprog) the seat and sweep caches count their
+# hits and misses through. Nothing here points GOCACHEPROG at it: a setting that
+# uses it belongs to the caller, not the image.
+COPY --chmod=0755 bin/gt-gocacheprog /usr/local/bin/gt-gocacheprog
 
 # -gcflags is part of Go's build cache key: it must equal the seed job's flag (cachevol.GoCompileFlags).
 ENV PATH="/usr/local/go/bin:/sandbox/go/bin:${PATH}" \

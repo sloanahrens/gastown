@@ -1,9 +1,9 @@
 // Package imagectx stages the polecat image's build context from the pins
-// (gt-gg9hv.33): the cross-compiled gt, polecat-image and sweep-run, the bd built
-// at its pin, the seed sources at their pins and the Go floor. Every source with
-// no checkout is fetched by URL, and no container engine runs here, so the CI
-// job can stage the context and `make polecat-image` does only the engine build
-// and the push after it.
+// (gt-gg9hv.33): the cross-compiled gt, polecat-image, sweep-run and
+// gt-gocacheprog, the bd built at its pin, the seed sources at their pins and
+// the Go floor. Every source with no checkout is fetched by URL, and no
+// container engine runs here, so the CI job can stage the context and
+// `make polecat-image` does only the engine build and the push after it.
 //
 // Every command the build runs goes through one of the Seams, so a test sees
 // each argv and no engine can be reached from this package.
@@ -203,6 +203,7 @@ func Build(ctx context.Context, in Inputs, s Seams) (Result, error) {
 	for _, b := range []struct{ name, pkg string }{
 		{"gt", "./cmd/gt"},
 		{"polecat-image", "./plugins/polecat-image"},
+		{"gt-gocacheprog", "./cmd/gt-gocacheprog"},
 		{"sweep-run", "./cmd/sweep-run"},
 	} {
 		out := filepath.Join(in.Out, "bin", b.name)

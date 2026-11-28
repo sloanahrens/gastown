@@ -453,6 +453,7 @@ func TestContextHoldsThePayloadTheDockerfileCopies(t *testing.T) {
 		filepath.Join("bin", "bd"),
 		filepath.Join("bin", "polecat-image"),
 		filepath.Join("bin", "sweep-run"),
+		filepath.Join("bin", "gt-gocacheprog"),
 		filepath.Join("seed", "gastown", "go.mod"),
 		filepath.Join("seed", "devops", "go.mod"),
 		filepath.Join("seed", "beads", "go.mod"),
@@ -475,9 +476,9 @@ func TestContextHoldsThePayloadTheDockerfileCopies(t *testing.T) {
 			t.Errorf("the printed lines lack %q\n%s", want, strings.Join(res.Lines(), "\n"))
 		}
 	}
-	// The gt, polecat-image and sweep-run binaries are cross-compiled for the
-	// image's platform by the build's environment, not by the recipe.
-	for _, pkg := range []string{"./cmd/gt", "./plugins/polecat-image", "./cmd/sweep-run"} {
+	// The town binaries are cross-compiled for the image's platform by the
+	// build's environment, not by the recipe.
+	for _, pkg := range []string{"./cmd/gt", "./plugins/polecat-image", "./cmd/sweep-run", "./cmd/gt-gocacheprog"} {
 		env := envOfCall(t, w, pkg)
 		for _, want := range []string{"GOOS=linux", "GOARCH=arm64", "CGO_ENABLED=0"} {
 			if !contains(env, want) {
@@ -544,11 +545,12 @@ func TestGTPinMatchesTheDaemonImageGtBuild(t *testing.T) {
 	}
 }
 
-// TestTheThreeBinariesAreBuiltThroughGoBuildArgv checks the context command
-// builds gt, polecat-image and sweep-run with bdbuild.GoBuildArgv and no other
-// argv, so the shared flags cannot drift between this command and the daemon
-// image. Mutation: give one binary its own argv, and this fails.
-func TestTheThreeBinariesAreBuiltThroughGoBuildArgv(t *testing.T) {
+// TestTheTownBinariesAreBuiltThroughGoBuildArgv checks the context command
+// builds gt, polecat-image, sweep-run and gt-gocacheprog with
+// bdbuild.GoBuildArgv and no other argv, so the shared flags cannot drift
+// between this command and the daemon image. Mutation: give one binary its own
+// argv, and this fails.
+func TestTheTownBinariesAreBuiltThroughGoBuildArgv(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
 	out := t.TempDir()
@@ -559,11 +561,26 @@ func TestTheThreeBinariesAreBuiltThroughGoBuildArgv(t *testing.T) {
 		{"gt", "./cmd/gt"},
 		{"polecat-image", "./plugins/polecat-image"},
 		{"sweep-run", "./cmd/sweep-run"},
+		{"gt-gocacheprog", "./cmd/gt-gocacheprog"},
 	} {
 		want := bdbuild.GoBuildArgv(filepath.Join(out, "bin", b.name), b.pkg)
 		if got := goArgvOf(t, w, b.pkg); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s was built with %q, want GoBuildArgv %q", b.name, got, want)
 		}
+	}
+}
+
+// TestAFailedGocacheprogCompileFailsBuildNamingIt checks that a compile of the
+// cache program that fails makes Build return an error naming the binary.
+// Mutation: drop gt-gocacheprog from the build list, and no call fails and this
+// goes red.
+func TestAFailedGocacheprogCompileFailsBuildNamingIt(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.failGo = []string{"./cmd/gt-gocacheprog"}
+	_, err := Build(context.Background(), w.inputs(t.TempDir()), w.seams())
+	if err == nil || !strings.Contains(err.Error(), "cannot build gt-gocacheprog") {
+		t.Fatalf("Build error = %v, want it to name the failed gt-gocacheprog compile", err)
 	}
 }
 
