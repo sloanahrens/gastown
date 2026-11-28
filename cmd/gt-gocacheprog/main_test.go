@@ -23,7 +23,7 @@ func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 func checkRefused(t *testing.T, args []string, check func(string) error, want string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	if code := run(args, strings.NewReader(""), &stdout, &stderr, check); code != 1 || stdout.Len() != 0 {
+	if code := run(args, strings.NewReader(""), &stdout, &stderr, check, time.Now); code != 1 || stdout.Len() != 0 {
 		t.Fatalf("run = %d, stdout %q: want 1 and empty", code, stdout.String())
 	}
 	if got := stderr.String(); strings.Count(got, "\n") != 1 || !strings.Contains(got, want) {
@@ -56,20 +56,20 @@ func TestRunRefusesBadArgs(t *testing.T) {
 }
 
 // TestRunEmptyStdinIsHandshakeOnly: a usable -dir with no requests exits 0
-// with the handshake on stdout, nothing on stderr and the directory empty
-// (gt-6i1x13, gt-dpjby4).
+// with the handshake on stdout, nothing on stderr and the stats line alone in
+// the directory (gt-6i1x13, gt-dpjby4, gt-l4bzgs).
 func TestRunEmptyStdinIsHandshakeOnly(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"-dir", dir}, strings.NewReader(""), &stdout, &stderr, writableCheck); code != 0 || stderr.Len() != 0 {
+	if code := run([]string{"-dir", dir}, strings.NewReader(""), &stdout, &stderr, writableCheck, time.Now); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("run = %d, stderr %q: want 0 and empty", code, stderr.String())
 	}
 	if got := responses(t, stdout.String()); len(got) != 1 || got[0].ID != 0 {
 		t.Errorf("stdout = %q: want the handshake alone", stdout.String())
 	}
-	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
-		t.Errorf("dir = %v, %v: want empty", entries, err)
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 || entries[0].Name() != statsFileName {
+		t.Errorf("dir = %v, %v: want %s alone", entries, err, statsFileName)
 	}
 }
 
@@ -102,7 +102,7 @@ func TestProgServeClose(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	in := strings.NewReader(`{"ID":1,"Command":"close"}` + "\n")
-	if code := run([]string{"-dir", t.TempDir()}, in, &stdout, &stderr, writableCheck); code != 0 || stderr.Len() != 0 {
+	if code := run([]string{"-dir", t.TempDir()}, in, &stdout, &stderr, writableCheck, time.Now); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("run = %d, stderr %q: want 0 and empty", code, stderr.String())
 	}
 	want := []gocacheprog.Response{{ID: 0, KnownCommands: []gocacheprog.Cmd{gocacheprog.CmdGet, gocacheprog.CmdPut, gocacheprog.CmdClose}}, {ID: 1}}
@@ -116,7 +116,7 @@ func TestProgServeClose(t *testing.T) {
 func TestProgServeMalformed(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"-dir", t.TempDir()}, strings.NewReader("{not json}\n"), &stdout, &stderr, writableCheck)
+	code := run([]string{"-dir", t.TempDir()}, strings.NewReader("{not json}\n"), &stdout, &stderr, writableCheck, time.Now)
 	if got := stderr.String(); code != 1 || strings.Count(got, "\n") != 1 || !strings.Contains(got, "malformed request") {
 		t.Fatalf("run = %d, stderr %q: want exit 1 and one line naming a malformed request", code, got)
 	}
@@ -213,7 +213,7 @@ func TestProgSession(t *testing.T) {
 	tail := `{"ID":2,"Command":"get","ActionID":"YWE="}` + "\n" + `{"ID":3,"Command":"get","ActionID":"Y2M="}` + "\n" + `{"ID":4,"Command":"close"}` + "\n"
 	in := io.MultiReader(strings.NewReader(head), &gateReader{ready: log.ready, inner: strings.NewReader(tail)})
 	var stderr bytes.Buffer
-	if code := run([]string{"-dir", t.TempDir()}, in, log, &stderr, writableCheck); code != 0 {
+	if code := run([]string{"-dir", t.TempDir()}, in, log, &stderr, writableCheck, time.Now); code != 0 {
 		t.Fatalf("run = %d, stderr %q: want exit 0", code, stderr.String())
 	}
 	if got := stderr.String(); got != "" {
@@ -264,5 +264,144 @@ func TestProgSession(t *testing.T) {
 	}
 	if last := got[len(got)-1]; last.ID != 4 {
 		t.Errorf("last answer = %+v, want the close for ID 4", last)
+	}
+}
+
+// statsLine is one line of dir/stats.jsonl, decoded.
+type statsLine struct {
+	Gets      int    `json:"gets"`
+	Hits      int    `json:"hits"`
+	Misses    int    `json:"misses"`
+	Puts      int    `json:"puts"`
+	PutBytes  int64  `json:"put_bytes"`
+	HitBytes  int64  `json:"hit_bytes"`
+	Errors    int    `json:"errors"`
+	Start     string `json:"start"`
+	ElapsedMS int64  `json:"elapsed_ms"`
+}
+
+// readStats decodes every line of the stats file in dir.
+func readStats(t *testing.T, dir string) []statsLine {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, statsFileName))
+	if err != nil {
+		t.Fatalf("stats file: %v", err)
+	}
+	var got []statsLine
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		var s statsLine
+		if err := json.Unmarshal([]byte(line), &s); err != nil {
+			t.Fatalf("stats line %q: %v", line, err)
+		}
+		got = append(got, s)
+	}
+	return got
+}
+
+// tickClock returns a clock yielding times in order, then its last.
+func tickClock(times ...time.Time) func() time.Time {
+	return func() time.Time {
+		t := times[0]
+		if len(times) > 1 {
+			times = times[1:]
+		}
+		return t
+	}
+}
+
+// TestStatsLineSessions: each session appends one line to <dir>/stats.jsonl —
+// one over a put, a hit and a miss, an empty one, and one whose Serve fails —
+// with exact counts, start and elapsed (gt-l4bzgs).
+func TestStatsLineSessions(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	clock := tickClock(t0, t0.Add(2*time.Second), t0.Add(2*time.Second), t0.Add(5*time.Second), t0.Add(5*time.Second), t0.Add(6*time.Second))
+	log := &answerLog{ready: make(chan struct{})}
+	head := `{"ID":1,"Command":"put","ActionID":"YWE=","OutputID":"YmI=","BodySize":5}` + "\n" + `"aGVsbG8="` + "\n"
+	tail := `{"ID":2,"Command":"get","ActionID":"YWE="}` + "\n" + `{"ID":3,"Command":"get","ActionID":"Y2M="}` + "\n" + `{"ID":4,"Command":"close"}` + "\n"
+	in := io.MultiReader(strings.NewReader(head), &gateReader{ready: log.ready, inner: strings.NewReader(tail)})
+	var stderr bytes.Buffer
+	if code := run([]string{"-dir", dir}, in, log, &stderr, writableCheck, clock); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("first session = %d, stderr %q: want 0 and empty", code, stderr.String())
+	}
+	if code := run([]string{"-dir", dir}, strings.NewReader(""), io.Discard, &stderr, writableCheck, clock); code != 0 {
+		t.Fatalf("second session = %d, want 0", code)
+	}
+	stderr.Reset()
+	if code := run([]string{"-dir", dir}, strings.NewReader("{not json}\n"), io.Discard, &stderr, writableCheck, clock); code != 1 {
+		t.Fatalf("failing session = %d, want 1", code)
+	}
+	if got := stderr.String(); strings.Count(got, "\n") != 1 || !strings.Contains(got, "malformed request") {
+		t.Errorf("failing session stderr = %q, want one line naming a malformed request", got)
+	}
+	want := []statsLine{
+		{Gets: 2, Hits: 1, Misses: 1, Puts: 1, PutBytes: 5, HitBytes: 5, Start: "2026-01-02T03:04:05Z", ElapsedMS: 2000},
+		{Start: "2026-01-02T03:04:07Z", ElapsedMS: 3000},
+		{Start: "2026-01-02T03:04:10Z", ElapsedMS: 1000},
+	}
+	if got := readStats(t, dir); !reflect.DeepEqual(got, want) {
+		t.Errorf("stats lines = %+v, want %+v", got, want)
+	}
+}
+
+// TestStatsLineUnwritable: with a directory standing at the stats file's path
+// the write fails for any user, one stderr line names it, and the session's
+// own exit status stands (gt-l4bzgs).
+func TestStatsLineUnwritable(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, statsFileName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"-dir", dir}, strings.NewReader(""), &stdout, &stderr, writableCheck, time.Now); code != 0 {
+		t.Fatalf("clean session = %d, stderr %q: want the session's 0", code, stderr.String())
+	}
+	if got := stderr.String(); strings.Count(got, "\n") != 1 || !strings.Contains(got, statsFileName) {
+		t.Errorf("stderr = %q, want one line naming %s", got, statsFileName)
+	}
+	if got := responses(t, stdout.String()); len(got) != 1 || got[0].ID != 0 {
+		t.Errorf("stdout = %q: want the handshake alone", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"-dir", dir}, strings.NewReader("{not json}\n"), &stdout, &stderr, writableCheck, time.Now); code != 1 {
+		t.Fatalf("failing session = %d, want the session's 1", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, statsFileName) || !strings.Contains(got, "malformed request") {
+		t.Errorf("stderr = %q, want the stats line and the serve line", got)
+	}
+}
+
+// fakeStatsFile fails appendStats's write or close when those are set.
+type fakeStatsFile struct {
+	writeErr error
+	closeErr error
+}
+
+func (f fakeStatsFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return len(p), nil
+}
+
+func (f fakeStatsFile) Close() error { return f.closeErr }
+
+// TestStatsLineRefusals: a refused open, write or close comes back from
+// appendStats with its cause (gt-l4bzgs).
+func TestStatsLineRefusals(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for name, open := range map[string]func(string) (io.WriteCloser, error){
+		"open refused":  func(string) (io.WriteCloser, error) { return nil, boom },
+		"write refused": func(string) (io.WriteCloser, error) { return fakeStatsFile{writeErr: boom}, nil },
+		"close refused": func(string) (io.WriteCloser, error) { return fakeStatsFile{closeErr: boom}, nil },
+	} {
+		if err := appendStats(t.TempDir(), gocacheprog.Stats{}, start, time.Now, open); !errors.Is(err, boom) {
+			t.Errorf("%s = %v, want %v", name, err, boom)
+		}
 	}
 }
