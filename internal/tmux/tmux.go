@@ -905,8 +905,8 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 			_, _, _ = t.runner()(context.Background(), "kill", "-TERM", dpid)
 		}
 
-		// Wait for graceful shutdown (2s gives processes time to clean up)
-		t.clk().Sleep(processKillGracePeriod)
+		// Wait for the descendants to exit, giving up after the grace period
+		t.waitGone(descendants)
 
 		// Send SIGKILL to any remaining descendants
 		for _, dpid := range descendants {
@@ -915,7 +915,7 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 
 		// Kill the pane process itself (may have called setsid() and detached)
 		_, _, _ = t.runner()(context.Background(), "kill", "-TERM", pid)
-		t.clk().Sleep(processKillGracePeriod)
+		t.waitGone([]string{pid})
 		_, _, _ = t.runner()(context.Background(), "kill", "-KILL", pid)
 	}
 

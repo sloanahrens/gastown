@@ -161,7 +161,8 @@ func TestNewTmuxWithExecPrefixAgentAliveReadsProcessesInside(t *testing.T) {
 }
 
 // KillSessionWithProcesses signals PIDs from the sandbox's process table, so
-// its kill calls go through the wrapper as well (gt-gi2ur).
+// its kill calls — the waitGone liveness probes and the signals — go through
+// the wrapper as well (gt-gi2ur).
 func TestNewTmuxWithExecPrefixKillSignalsInside(t *testing.T) {
 	t.Parallel()
 	clk := newFixedClock()
@@ -197,6 +198,11 @@ func TestNewTmuxWithExecPrefixKillSignalsInside(t *testing.T) {
 		}
 		if c.name != "openshell" || !c.has("sandbox", "exec", "-n", "gt-r-n", "--no-tty", "--no-login-shell", "--", "kill") {
 			t.Fatalf("kill ran outside the wrapper: %s", c)
+		}
+		if args[0] == "-0" {
+			// waitGone's liveness probes are not signals; how many it makes
+			// is the wait's business. The wrapper check above still applies.
+			continue
 		}
 		kills = append(kills, args[0]+" "+args[1])
 	}
