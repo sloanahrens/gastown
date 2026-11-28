@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +74,39 @@ func TestPoolSandboxlessFilter(t *testing.T) {
 			}
 			if !reflect.DeepEqual(in, before) {
 				t.Errorf("input modified: %+v, was %+v", in, before)
+			}
+		})
+	}
+}
+
+func TestPoolSandboxlessAgentRead(t *testing.T) {
+	t.Parallel()
+	const town = `{"type":"town-settings","version":1,"sandboxes":{"p":{"image":"i","policy":"p"}},"polecat_pool":{"seats":{"sandbox":{"cap":1,"backend":"openshell","sandbox":"p"},"host":{"cap":1}}}}`
+	cases := []struct {
+		name     string
+		body     string
+		agents   []string
+		want     []bool
+		warnings int
+	}{
+		{"openshell seat", town, []string{"sandbox"}, []bool{true}, 0},
+		{"host seat and unknown agent", town, []string{"host", "nobody"}, []bool{false, false}, 0},
+		{"unreadable town settings", "{not json", []string{"sandbox", "host"}, []bool{false, false}, 1},
+		{"unreadable seats", `{"type":"town-settings","version":1,"polecat_pool":{"seats":{"sandbox":{"cap":1,"backend":"openshell"}}}}`, []string{"sandbox"}, []bool{false}, 1},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root, _ := writeProfileTown(t, tt.body)
+			var warn bytes.Buffer
+			isSandbox := poolSandboxAgentRead(root, &warn)
+			for i, agent := range tt.agents {
+				if got := isSandbox(agent); got != tt.want[i] {
+					t.Errorf("isSandboxAgent(%q) = %v, want %v", agent, got, tt.want[i])
+				}
+			}
+			if got := strings.Count(warn.String(), "warning:"); got != tt.warnings {
+				t.Errorf("warnings = %d (%q), want %d", got, warn.String(), tt.warnings)
 			}
 		})
 	}

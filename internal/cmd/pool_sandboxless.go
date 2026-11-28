@@ -1,5 +1,24 @@
 package cmd
 
+import (
+	"fmt"
+	"io"
+)
+
+// poolSandboxAgentRead answers whether an agent's polecat_pool seat is an
+// openshell seat, the config.Seats read polecat.NewSandboxSeatProbe makes; what
+// it cannot read answers false for every agent with one warning (gt-0hgh5v).
+func poolSandboxAgentRead(townRoot string, warnOut io.Writer) func(agent string) bool {
+	agents, err := dashSandboxSeatAgents(townRoot)
+	if err != nil {
+		if warnOut != nil {
+			fmt.Fprintf(warnOut, "warning: cannot read the town's seats, so no seat counts as sandboxless: %v\n", err)
+		}
+		return func(string) bool { return false }
+	}
+	return func(agent string) bool { return agents[agent] }
+}
+
 // seatRunsNothing reports whether a seat's own read found nothing held and
 // nobody working: a measured sessionless disposition (DeadRead), no live work
 // in flight and an idle agent bead. A read that errored is a seat the pool
