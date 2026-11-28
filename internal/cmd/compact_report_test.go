@@ -535,6 +535,26 @@ func TestDailyDigestActiveCountsRigDatabases(t *testing.T) {
 	}
 }
 
+// The digest written with --json is machine output: its stdout is one JSON
+// document and is not empty, so a machine reader can take it.
+func TestCompactReportDailyDigestJSONPassesMachineStdout(t *testing.T) {
+	t.Parallel()
+	fx := newCompactReportFixture(t, time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC))
+	var out bytes.Buffer
+	fx.r.json = true
+	fx.r.out = &out
+
+	if err := fx.r.dailyDigest(); err != nil {
+		t.Fatalf("dailyDigest: %v", err)
+	}
+	if out.Len() == 0 {
+		t.Fatal("json digest wrote nothing, want the report")
+	}
+	if err := CheckMachineStdout("json", out.Bytes()); err != nil {
+		t.Errorf("daily digest --json stdout: %v", err)
+	}
+}
+
 // A database the digest cannot list does not block the digest: it names the
 // database in the Errors section, as the sweep does, and the Active column
 // counts the databases that answered.

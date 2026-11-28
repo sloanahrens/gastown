@@ -29,6 +29,12 @@ func TestWriteFormulaListPrintsTheSeam(t *testing.T) {
 	if !strings.HasPrefix(payload.String(), "[") || !strings.Contains(payload.String(), `"mol-widget"`) {
 		t.Errorf("json = %q, want the seeded formula in the JSON payload", payload.String())
 	}
+	if payload.Len() == 0 {
+		t.Fatal("json payload is empty, want the formula list")
+	}
+	if err := CheckMachineStdout("json", []byte(payload.String())); err != nil {
+		t.Errorf("formula list --json stdout: %v", err)
+	}
 }
 
 // writeFormulaShowRaw prints what bd formula show answers, in both forms.
