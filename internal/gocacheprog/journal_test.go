@@ -388,6 +388,17 @@ func TestJournalFailedRenameLeavesNoTmp(t *testing.T) {
 	}
 }
 
+func TestJournalFailedCleanupReportsRemoveError(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "j.log")
+	year10000 := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	errRemove := errors.New("remove refused")
+	_, err := openJournalNamedWith(path, func() time.Time { return year10000 }, func(string) error { return errRemove })
+	if !errors.Is(err, errRemove) {
+		t.Errorf("error = %v, want it to carry the remove failure", err)
+	}
+}
+
 func TestJournalExistingTmpIsRefused(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

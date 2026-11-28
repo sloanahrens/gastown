@@ -1,11 +1,10 @@
 package gocacheprog
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,11 +78,8 @@ func OpenJournal(dir string, now func() time.Time) (*Journal, error) {
 	if err := os.MkdirAll(jdir, 0o755); err != nil {
 		return nil, fmt.Errorf("gocacheprog: journal dir %s: %w", jdir, err)
 	}
-	var name [8]byte
-	if _, err := rand.Read(name[:]); err != nil {
-		return nil, fmt.Errorf("gocacheprog: journal name: %w", err)
-	}
-	return openJournalNamed(filepath.Join(jdir, hex.EncodeToString(name[:])+".log"), now)
+	name := fmt.Sprintf("%016x.log", rand.Uint64()) //nolint:gosec // G404: a file name, not a secret
+	return openJournalNamed(filepath.Join(jdir, name), now)
 }
 
 // openJournalNamed opens the journal at path through path+".tmp": the file is
@@ -91,28 +87,31 @@ func OpenJournal(dir string, now func() time.Time) (*Journal, error) {
 // A failure removes the .tmp file and releases the lock. A .tmp that already
 // exists is refused and left alone, since this call did not make it.
 func openJournalNamed(path string, now func() time.Time) (*Journal, error) {
+	return openJournalNamedWith(path, now, os.Remove)
+}
+
+// openJournalNamedWith is openJournalNamed with remove deleting the .tmp file on failure.
+func openJournalNamedWith(path string, now func() time.Time, remove func(string) error) (*Journal, error) {
 	tmp := path + ".tmp"
 	if _, err := os.Lstat(tmp); err == nil {
 		return nil, fmt.Errorf("gocacheprog: journal %s: %s already exists", path, tmp)
 	}
+	// A file that was never created is not an error to remove.
+	removeTmp := func() error {
+		if err := remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("gocacheprog: journal %s: remove %s: %w", path, tmp, err)
+		}
+		return nil
+	}
 	j, err := openJournalAt(tmp, now)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("gocacheprog: journal %s: %w", path, err), removeTmp(tmp))
+		return nil, errors.Join(fmt.Errorf("gocacheprog: journal %s: %w", path, err), removeTmp())
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return nil, errors.Join(fmt.Errorf("gocacheprog: journal %s: rename: %w", path, err), j.Close(), removeTmp(tmp))
+		return nil, errors.Join(fmt.Errorf("gocacheprog: journal %s: rename: %w", path, err), j.Close(), removeTmp())
 	}
 	j.path = path
 	return j, nil
-}
-
-// removeTmp deletes the .tmp file a failed open left behind. A file that was
-// never created is not an error.
-func removeTmp(tmp string) error {
-	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
 }
 
 // Path returns the file this journal writes.
