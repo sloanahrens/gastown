@@ -2,9 +2,12 @@ package forgejoserver
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // manifestDocs lists the documents server.yaml holds, in file order, each with
@@ -17,11 +20,27 @@ var manifestDocs = []struct{ file, kind, name string }{
 }
 
 // recordedCPU and manifestCPU are the requests.cpu the record holds and the
-// manifest writes instead (gt-1x40gk). manifestDBHost replaces the record's
-// database host, a host followed by :5442, with a placeholder: no manifest
-// spells a real host (gt-3zlo1f fills it in).
+// manifest writes instead (gt-1x40gk).
 const recordedCPU, manifestCPU = "500m", "750m"
-const manifestDBHost = "CONTROL_PLANE_HOST:5442"
+
+// kindHost returns the kind environment's control_plane_host, the value the
+// manifest is rendered with.
+func kindHost(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile("../values/kind/hosts.yaml")
+	if err != nil {
+		t.Fatalf("reading the kind hosts file: %v", err)
+	}
+	var hosts map[string]any
+	if err := yaml.Unmarshal(raw, &hosts); err != nil {
+		t.Fatalf("decoding the kind hosts file: %v", err)
+	}
+	host, _ := hosts["control_plane_host"].(string)
+	if host == "" {
+		t.Fatal("the kind hosts file names no control_plane_host")
+	}
+	return host
+}
 
 // jsonDecoded returns v after a JSON encode and decode, so a number is the
 // float64 encoding/json reads on both sides of a comparison.
@@ -96,12 +115,13 @@ func databaseHostEnv(t *testing.T, deployment map[string]any) map[string]any {
 	return nil
 }
 
-// objects returns server.yaml's documents, failing unless there is one per manifestDocs row.
-func objects(t *testing.T) []map[string]any {
+// objects returns the manifest's documents rendered for controlPlaneHost,
+// failing unless there is one per manifestDocs row.
+func objects(t *testing.T, controlPlaneHost string) []map[string]any {
 	t.Helper()
-	objs, err := Objects()
+	objs, err := Objects(controlPlaneHost)
 	if err != nil {
-		t.Fatalf("Objects(): %v", err)
+		t.Fatalf("Objects(%q): %v", controlPlaneHost, err)
 	}
 	if len(objs) != len(manifestDocs) {
 		t.Fatalf("Objects() returned %d documents, want %d", len(objs), len(manifestDocs))
@@ -111,7 +131,8 @@ func objects(t *testing.T) []map[string]any {
 
 func TestManifestMatchesRecorded(t *testing.T) {
 	t.Parallel()
-	objs := objects(t)
+	host := kindHost(t)
+	objs := objects(t, host)
 	for i, want := range manifestDocs {
 		t.Run(want.kind+" "+want.name, func(t *testing.T) {
 			got := objs[i]
@@ -125,16 +146,54 @@ func TestManifestMatchesRecorded(t *testing.T) {
 					t.Fatalf("recorded requests.cpu = %v, want %s", requests["cpu"], recordedCPU)
 				}
 				requests["cpu"] = manifestCPU
-				host := databaseHostEnv(t, recorded)
-				if v, ok := host["value"].(string); !ok || v == ":5442" || !strings.HasSuffix(v, ":5442") {
-					t.Fatalf("recorded FORGEJO__database__HOST = %v, want a host followed by :5442", host["value"])
+				dbHost := databaseHostEnv(t, recorded)
+				if v, _ := dbHost["value"].(string); v != host+":5442" {
+					t.Fatalf("recorded FORGEJO__database__HOST = %v, want the hosts file's %s:5442", dbHost["value"], host)
 				}
-				host["value"] = manifestDBHost
 			}
 			if w, g := jsonDecoded(t, recorded), jsonDecoded(t, got); !reflect.DeepEqual(w, g) {
 				t.Errorf("%s %s differs from its recorded object\nrecord:   %v\nmanifest: %v", want.kind, want.name, w, g)
 			}
 		})
+	}
+}
+
+// TestManifestRefuses drives every refusal branch: a host no environment may
+// name, and a file whose placeholder is absent or holds twice.
+func TestManifestRefuses(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, host string }{
+		{"empty", ""},
+		{"over-long", strings.Repeat("a", 254)},
+		{"malformed", "-bad"},
+		{"unfilled placeholder", "CONTROL_PLANE_HOST"},
+	} {
+		t.Run("host "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			if raw, err := Manifest(tc.host); err == nil {
+				t.Fatalf("Manifest(%q) = %q, want an error", tc.host, raw)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, raw string }{
+		{"absent", "no database host here\n"},
+		{"twice", databaseHostPlaceholder + "\n" + databaseHostPlaceholder + "\n"},
+	} {
+		t.Run("placeholder "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			if raw, err := fillHost([]byte(tc.raw), "host.example"); err == nil {
+				t.Fatalf("fillHost(%q) = %q, want an error", tc.raw, raw)
+			}
+		})
+	}
+}
+
+// TestObjectsRefusesAHost checks Objects propagates Manifest's refusal rather
+// than decoding the unfilled placeholder.
+func TestObjectsRefusesAHost(t *testing.T) {
+	t.Parallel()
+	if objs, err := Objects("CONTROL_PLANE_HOST"); err == nil {
+		t.Fatalf("Objects(CONTROL_PLANE_HOST) = %v, want an error", objs)
 	}
 }
 

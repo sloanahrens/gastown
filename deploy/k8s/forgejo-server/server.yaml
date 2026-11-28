@@ -4,7 +4,8 @@
 # two Deployment values server_test.go names.
 #
 # The database password comes from Secret pg, key PASSWD, made by hand. Never apply
-# this file as it stands: CONTROL_PLANE_HOST is a placeholder.
+# this file as it stands: Manifest fills CONTROL_PLANE_HOST from the environment's
+# values/<env>/hosts.yaml (control_plane_host).
 #
 # Applied only by the overseer's adoption step. gt town cluster render never reads
 # this file, so no applied set owns it.
