@@ -166,13 +166,18 @@ CI_BASE_TAG ?= ci-base:gate-tools
 CI_BASE_CONTEXT ?= deploy/ci-base
 
 # One recipe line: make runs a line that holds $(MAKE) even under -n, so the
-# guard and the pin read share a line and an empty base is refused first.
+# guard and the pin read share a line and an empty base is refused first. The
+# cache program is cross-compiled into the build context before the image build
+# and removed after it, so the binary is never committed (gt-yiohwp).
 ci-base-image:
 	@test -n "$(CI_BASE_IMAGE)" || { echo "ci-base-image: CI_BASE_IMAGE is empty, so there is no runner image to extend: name the image ~/forgejo/runner-image builds" >&2; exit 2; }; \
 	pin="$$($(MAKE) -s golangci-lint-version)"; \
+	mkdir -p "$(CI_BASE_CONTEXT)/bin"; \
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "$(CI_BASE_CONTEXT)/bin/gt-gocacheprog" ./cmd/gt-gocacheprog || { rm -rf "$(CI_BASE_CONTEXT)/bin"; exit 1; }; \
 	docker build --build-arg CI_BASE_IMAGE="$(CI_BASE_IMAGE)" \
 		--build-arg GOLANGCI_LINT_VERSION="$$pin" \
-		-t "$(CI_BASE_TAG)" "$(CI_BASE_CONTEXT)"
+		-t "$(CI_BASE_TAG)" "$(CI_BASE_CONTEXT)"; \
+	rc=$$?; rm -rf "$(CI_BASE_CONTEXT)/bin"; exit $$rc
 
 # The OpenShell polecat sandbox pieces an operator runs by hand (claude-q3f.9).
 # deploy/polecat lands from the crew branch; no target below runs in the gate.

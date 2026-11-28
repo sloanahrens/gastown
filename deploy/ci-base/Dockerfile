@@ -48,5 +48,15 @@ RUN curl -fsSL -o /usr/local/bin/jq \
  && chmod 0755 /usr/local/bin/jq \
  && test "$(jq --version)" = "jq-${JQ_VERSION}"
 
+# The Go cache program a job's -cacheprog can run (gt-yiohwp): the make target
+# cross-compiles it into bin/ beside this file, and the COPY installs it. The
+# store is created here, owned by the job user, because a named volume first
+# mounted at a path the image lacks is created root-owned (gt-9ui7q). Nothing
+# sets GOCACHEPROG: the image carries the program and the job switches it on.
+COPY bin/gt-gocacheprog /usr/local/bin/gt-gocacheprog
+RUN chmod 0755 /usr/local/bin/gt-gocacheprog \
+ && test -x /usr/local/bin/gt-gocacheprog \
+ && install -d -o "${BASE_USER}" /home/ci/.cache/gt-gocacheprog
+
 # Back to the base image's user, so the image runs as the user it was built on.
 USER ${BASE_USER}

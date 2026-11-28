@@ -15,6 +15,8 @@ plugins/*/bin/
 /deploy/polecat/bin/
 # make polecat-image stages the pinned seed sources here (gt-ieuvf)
 /deploy/polecat/seed/
+# make ci-base-image cross-compiles the Go cache program here (gt-yiohwp)
+/deploy/ci-base/bin/
 
 # IDE
 .idea/
