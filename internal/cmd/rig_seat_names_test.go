@@ -33,6 +33,7 @@ func writeRigSettingsNamepool(t *testing.T, townRoot, rigName string, pool *conf
 }
 
 func TestRigSeatNames(t *testing.T) {
+	t.Parallel()
 	t.Run("custom names capped by max_before_numbering, seat names lower-cased once and sorted", func(t *testing.T) {
 		townRoot, rigName := seatNamesRig(t)
 		writeRigSettingsNamepool(t, townRoot, rigName, &config.NamepoolConfig{
