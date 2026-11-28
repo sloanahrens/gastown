@@ -22,10 +22,26 @@ var (
 // intro; every other step points at it rather than restating it (R2).
 const checkRule = "never build, lint, vet, test or run anything"
 
+// checkCondition is the phrase in a seat's directive that makes the seat
+// write-only; the formula's "Who runs checks" heading is conditional on it.
+const checkCondition = "you write code, the gate runs it"
+
+// checkHeading is the unconditional heading that told every rig to run no check.
+const checkHeading = "**You run no check.**"
+
 // writeOnlyProblems lists each way mol-polecat-work tells a seat to run a check
 // the landing gate owns, restates the rule, or drops a rule it must carry.
 func writeOnlyProblems(text string) []string {
 	var out []string
+	if !strings.Contains(text, checkCondition) {
+		out = append(out, "the text lacks the directive condition "+checkCondition)
+	}
+	if strings.Contains(text, checkHeading) {
+		out = append(out, "the unconditional heading You run no check is back")
+	}
+	if strings.Contains(text, "see You run no check") {
+		out = append(out, "a step points at You run no check")
+	}
 	for _, m := range checkProgram.FindAllStringSubmatch(text, -1) {
 		out = append(out, "a step runs "+strings.TrimSpace(m[1]))
 	}
@@ -96,6 +112,9 @@ func TestPolecatFormulaSeatRunsNoCheck(t *testing.T) {
 		{"the excerpt is gone", strings.Replace(text, "excerpt of the failing gate log", "", 1), "lacks excerpt of the failing gate log"},
 		{"the reproduction claim is gone", strings.Replace(text, "cannot reproduce it", "", 1), "lacks cannot reproduce it"},
 		{"the escalation is gone", strings.Replace(text, "`gt escalate` instead of guessing", "", 1), "lacks `gt escalate` instead of guessing"},
+		{"the directive condition is gone", strings.Replace(text, checkCondition, "every seat", 1), "lacks the directive condition " + checkCondition},
+		{"the unconditional heading is back", strings.Replace(text, "**Who runs checks.**", checkHeading, 1), "the unconditional heading You run no check is back"},
+		{"a pointer names the old heading", text + "\nNothing to run (see You run no check).\n", "a step points at You run no check"},
 	} {
 		if got := strings.Join(writeOnlyProblems(tc.text), "\n"); !strings.Contains(got, tc.want) {
 			t.Errorf("%s: problems %q do not name %q", tc.name, got, tc.want)
