@@ -154,12 +154,17 @@ const ciGocacheprogVolume = "ci-gocacheprog"
 // ciGocacheprogStatsMaxBytes bounds the stats file a read takes: 8 MiB is far past a run's.
 const ciGocacheprogStatsMaxBytes = 8 << 20
 
-// ciGocacheprogReadScript moves $1 aside to $2, prints the first $3 bytes of it and removes $2; exit 3 is absent.
+// ciGocacheprogReadScript moves $1 aside to $2, prints the first $3 bytes of it and removes $2.
+// Exit 3 is absent; 4 is a link (removed) or other non-regular entry (left) at $1 or at $2 after the move; 5 is an aside path it cannot clear.
 const ciGocacheprogReadScript = `set -eu
 src=$1; aside=$2; limit=$3
-trap 'rm -f "$aside"' EXIT
-[ -f "$src" ] || { echo "stats file not found" >&2; exit 3; }
+trap 'rm -f "$aside" 2>/dev/null || true' EXIT
+if [ ! -e "$src" ] && [ ! -L "$src" ]; then echo "stats file not found" >&2; exit 3; fi
+if [ -L "$src" ]; then rm -f "$src"; echo "the stats path is not a regular file" >&2; exit 4; fi
+if [ ! -f "$src" ]; then echo "the stats path is not a regular file" >&2; exit 4; fi
+rm -f "$aside" 2>/dev/null || { echo "the aside path cannot be cleared" >&2; exit 5; }
 mv "$src" "$aside"
+if [ -L "$aside" ] || [ ! -f "$aside" ]; then echo "the stats path is not a regular file" >&2; exit 4; fi
 head -c "$limit" "$aside"
 `
 
