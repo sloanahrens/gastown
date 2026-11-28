@@ -274,10 +274,10 @@ func settle[T any](t *testing.T, ch <-chan T, what string) T {
 // hit is the entry heldStore answers with.
 var hit = gocacheprog.Entry{OutputID: []byte("x"), Size: 3, DiskPath: "/store/x"}
 
-// heldStore holds every get whose action ID is hold until release, answers the
+// heldStore holds every get whose action ID is in hold until release, answers the
 // rest at once, counts the gets it received, and counts the held gets it finished.
 type heldStore struct {
-	hold    string
+	hold    []string
 	started chan struct{}
 	release chan struct{}
 
@@ -290,7 +290,7 @@ func (s *heldStore) Get(actionID []byte) (gocacheprog.Entry, error) {
 	s.mu.Lock()
 	s.gets++
 	s.mu.Unlock()
-	if string(actionID) != s.hold {
+	if !slices.Contains(s.hold, string(actionID)) {
 		return hit, nil
 	}
 	s.started <- struct{}{}
@@ -352,28 +352,59 @@ func serve(t *testing.T, in io.Reader, out io.Writer, store *heldStore, stop fun
 
 func TestServeParallelHeldGetThenBadLine(t *testing.T) {
 	t.Parallel()
-	store := &heldStore{hold: "a", started: make(chan struct{}, 1), release: make(chan struct{})}
-	// The get is held, and the input then holds a line that is not a request.
+	store := &heldStore{hold: []string{"a", "b"}, started: make(chan struct{}, 2), release: make(chan struct{})}
+	// Both gets are held, and the input then holds a line that is not a request.
 	in := `{"ID":1,"Command":"get","ActionID":"YQ=="}` + "\n" +
+		`{"ID":2,"Command":"get","ActionID":"Yg=="}` + "\n" +
 		"not a request\n"
 	var buf strings.Builder
 	release := sync.OnceFunc(func() { close(store.release) })
 	done := serve(t, strings.NewReader(in), &buf, store, release)
-	settle(t, store.started, "the held get must start")
+	settle(t, store.started, "the first held get must start")
+	settle(t, store.started, "the second held get must start")
 	release()
 	run := settle(t, done, "Serve must return")
 	if run.err == nil || !strings.Contains(run.err.Error(), "malformed") {
 		t.Fatalf("Serve = %v, want the malformed request error", run.err)
 	}
+	if run.finished != 2 {
+		t.Errorf("store had finished %d gets when Serve returned, want both held gets finished (2)", run.finished)
+	}
+	got := decodeResponses(t, buf.String())
+	if len(got) != 3 || !reflect.DeepEqual(got[0], handshake) {
+		t.Fatalf("responses = %+v, want the handshake and the two hits", got)
+	}
+	// The hits come in either order, so they are sorted by ID before the check.
+	slices.SortFunc(got, func(a, b gocacheprog.Response) int { return cmp.Compare(a.ID, b.ID) })
+	for i, resp := range got[1:] {
+		if resp.ID != int64(i+1) || resp.Miss || string(resp.OutputID) != "x" || resp.Size != 3 {
+			t.Errorf("response = %+v, want the whole hit x for ID %d", resp, i+1)
+		}
+	}
+}
+
+func TestServeParallelEndOfInputHeldWriteError(t *testing.T) {
+	t.Parallel()
+	store := &heldStore{hold: []string{"a"}, started: make(chan struct{}, 1), release: make(chan struct{})}
+	// The get is held, and the input then ends. The handshake is the only write
+	// the writer accepts, so the held get's response write fails after the end
+	// of input, and Serve must return that write error, not nil.
+	in := `{"ID":1,"Command":"get","ActionID":"YQ=="}` + "\n"
+	out := &failWriter{n: 1, err: errors.New("pipe closed"), failed: make(chan struct{}, 1)}
+	release := sync.OnceFunc(func() { close(store.release) })
+	done := serve(t, strings.NewReader(in), out, store, release)
+	settle(t, store.started, "the held get must start")
+	release()
+	run := settle(t, done, "Serve must return")
+	if run.err == nil || !strings.Contains(run.err.Error(), "pipe closed") {
+		t.Fatalf("Serve = %v, want the held response's write error", run.err)
+	}
 	if run.finished != 1 {
 		t.Errorf("store had finished %d gets when Serve returned, want the held get finished (1)", run.finished)
 	}
-	got := decodeResponses(t, buf.String())
-	if len(got) != 2 || !reflect.DeepEqual(got[0], handshake) {
-		t.Fatalf("responses = %+v, want the handshake and the hit", got)
-	}
-	if resp := got[1]; resp.ID != 1 || resp.Miss || string(resp.OutputID) != "x" || resp.Size != 3 {
-		t.Errorf("response = %+v, want the whole hit x for ID 1", resp)
+	settle(t, out.failed, "the held get's response write must be refused")
+	if got := decodeResponses(t, out.buf.String()); !reflect.DeepEqual(got, []gocacheprog.Response{handshake}) {
+		t.Errorf("responses = %+v, want the handshake only", got)
 	}
 }
 
@@ -395,7 +426,7 @@ func (g *gateReader) Read(p []byte) (int, error) {
 
 func TestServeParallelWriteErrorStartsNoRequest(t *testing.T) {
 	t.Parallel()
-	store := &heldStore{hold: "a", started: make(chan struct{}, 1), release: make(chan struct{})}
+	store := &heldStore{hold: []string{"a"}, started: make(chan struct{}, 1), release: make(chan struct{})}
 	// The first get is held in the store. The second is answered at once, and its
 	// response write fails. The third waits behind gate, which the test opens only
 	// after that write has failed: a Serve that reads on and starts it has no
