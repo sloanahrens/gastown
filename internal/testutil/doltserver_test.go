@@ -135,31 +135,38 @@ func TestWaitForMappedPortGivesUpAtBudget(t *testing.T) {
 	}
 }
 
-// A readiness step whose port never appears still has to wait out the whole
-// poll budget, and this pins that the budget is spent in the injected seam
-// rather than in real time (gt-d8h2i).
+// A readiness step whose port never appears walks the whole poll budget through
+// the injected sleep: one gap of the poll interval between each lookup and
+// none after the last. The seam's record is the budget, so the test reads no
+// clock and a wait that sleeps by itself or stops short fails it (gt-ivkc7h).
 func TestAwaitDoltReadyDoesNotSpendThePollBudgetInRealTime(t *testing.T) {
 	t.Parallel()
-	slept := false
-	start := time.Now()
+	var sleeps []time.Duration
+	lookups := 0
 	err := awaitDoltReadySleeping(context.Background(),
 		func(_ context.Context, containerPort string) (string, error) {
+			lookups++
 			return "", fmt.Errorf("getting mapped port: port %q not found: %w", containerPort, context.DeadlineExceeded)
 		},
 		func(context.Context, string) error {
 			t.Fatalf("probe ran for a container whose port was never published")
 			return nil
 		},
-		func(time.Duration) { slept = true },
+		func(d time.Duration) { sleeps = append(sleeps, d) },
 	)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want the lookup's deadline error", err)
 	}
-	if !slept {
-		t.Fatalf("the wait returned without sleeping, so it never walked the poll budget")
+	if lookups != mappedPortPolls {
+		t.Fatalf("looked up the port %d times, want %d", lookups, mappedPortPolls)
 	}
-	if elapsed := time.Since(start); elapsed >= mappedPortPollInterval {
-		t.Fatalf("awaitDoltReadySleeping took %s, more than one real poll interval, so the budget was not spent in the seam", elapsed)
+	if len(sleeps) != mappedPortPolls-1 {
+		t.Fatalf("slept %d times, want %d: one gap between each of the %d polls", len(sleeps), mappedPortPolls-1, mappedPortPolls)
+	}
+	for i, d := range sleeps {
+		if d != mappedPortPollInterval {
+			t.Fatalf("sleep %d = %s, want the poll interval %s", i, d, mappedPortPollInterval)
+		}
 	}
 }
 
