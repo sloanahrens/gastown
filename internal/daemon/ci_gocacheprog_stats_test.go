@@ -1,7 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"maps"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -183,5 +187,67 @@ func TestCIGocacheprogSumRefusesStoreOverflow(t *testing.T) {
 	}
 	if !maps.Equal(store, wantStore) {
 		t.Fatalf("store overflow pair gave store %v; want %v", store, wantStore)
+	}
+}
+
+// ciGocacheprogReadWith runs one read against a fake exec that answers reply, returning the read's result and the exec calls.
+func ciGocacheprogReadWith(reply cliReply) ([]byte, bool, []cliCall, error) {
+	cli := newFakeCLIFor(func(cliCall) cliReply { return reply })
+	data, present, err := (&Daemon{execCmd: cli.run}).ciGocacheprogRead(context.Background(), ciCacheExecTarget{runner: ciCacheGateRunner, kubeconfig: "kubeconfig", kubeContext: ciCacheTestContext, pod: ciCacheTestPod})
+	return data, present, cli.recorded(), err
+}
+
+func TestCIGocacheprogReadPresentData(t *testing.T) {
+	t.Parallel()
+	root := ciCacheVolumeRoot(ciGocacheprogVolume)
+	data, present, calls, err := ciGocacheprogReadWith(cliReply{stdout: ciGocacheprogStatsLine + "\n"})
+	if err != nil || !present || string(data) != ciGocacheprogStatsLine+"\n" {
+		t.Fatalf("read = %q, %v, %v; want the file back, true, nil", data, present, err)
+	}
+	if len(calls) != 1 || !slices.Contains(calls[0].args, root+"/stats.jsonl") {
+		t.Fatalf("execs %v; want one exec naming %s/stats.jsonl", calls, root)
+	}
+	for _, arg := range calls[0].args {
+		if strings.HasPrefix(arg, "/") && !strings.HasPrefix(arg, root+"/") {
+			t.Fatalf("exec names %q, outside the volume root %s", arg, root)
+		}
+	}
+	data, present, _, err = ciGocacheprogReadWith(cliReply{stdout: strings.Repeat("x", ciGocacheprogStatsMaxBytes)})
+	if err != nil || !present || len(data) != ciGocacheprogStatsMaxBytes {
+		t.Fatalf("a reply at the limit gave %d bytes, %v, %v; want all of it, true, nil", len(data), present, err)
+	}
+}
+
+func TestCIGocacheprogReadAbsentIsClean(t *testing.T) {
+	t.Parallel()
+	data, present, _, err := ciGocacheprogReadWith(cliReply{code: 3, stderr: "stats file not found\n"})
+	if err != nil || present || data != nil {
+		t.Fatalf("absent volume or file = %q, %v, %v; want nil, false, nil", data, present, err)
+	}
+}
+
+func TestCIGocacheprogReadRefusals(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name  string
+		reply cliReply
+		want  string
+	}{
+		{"an oversize reply", cliReply{stdout: strings.Repeat("x", ciGocacheprogStatsMaxBytes+1)}, strconv.Itoa(ciGocacheprogStatsMaxBytes)},
+		{"a failed exec", cliReply{code: 1, stderr: "first line\nmv: cannot stat\ncommand terminated with exit code 1\n"}, "mv: cannot stat"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			data, present, _, err := ciGocacheprogReadWith(row.reply)
+			switch {
+			case err == nil:
+				t.Fatalf("accepted %s: %d bytes", row.name, len(data))
+			case !present:
+				t.Fatalf("%s = present false with error %v; only an absent volume or file is a clean absence", row.name, err)
+			case !strings.Contains(err.Error(), row.want):
+				t.Fatalf("%s error %q; want it to name %q", row.name, err, row.want)
+			}
+		})
 	}
 }
