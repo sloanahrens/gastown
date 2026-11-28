@@ -54,6 +54,7 @@ func writeOnlyProblems(text string) []string {
 		"lint, build and the tests of the packages",
 		"runs none of them",
 		"you run none",
+		"You run no check of your own",
 	} {
 		if strings.Contains(text, restated) {
 			out = append(out, "the text restates the rule: "+restated)
@@ -80,6 +81,7 @@ func TestPolecatFormulaSeatRunsNoCheck(t *testing.T) {
 		{"the old gate sentence is back", text + "\nIt runs lint, build and the tests of the packages your branch changed.\n", "restates the rule: lint, build and the tests of the packages"},
 		{"runs none of them is back", text + "\nThe landing gate runs the checks; a seat runs none of them.\n", "restates the rule: runs none of them"},
 		{"you run none is back", text + "\nThe landing gate runs the tests, you run none.\n", "restates the rule: you run none"},
+		{"you run no check of your own is back", text + "\nYou run no check of your own.\n", "restates the rule: You run no check of your own"},
 		{"the rule is gone", strings.Replace(text, checkRule, "the gate checks", 1), "lacks " + checkRule},
 		{"the rule is stated twice", text + "\n" + checkRule + ".\n", "the text states the rule 2 times"},
 		{"the excerpt is gone", strings.Replace(text, "excerpt of the failing gate log", "", 1), "lacks excerpt of the failing gate log"},

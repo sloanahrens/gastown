@@ -529,7 +529,7 @@ needs = ["pre-verify"]
 description = """
 Submit your work and clean up. You cease to exist after this step.
 
-**Run `gt done` last.** It runs the rig's configured pre-submit command, which may check nothing, then submits. You run no check of your own; if that command fails, fix what its output names, commit and run `gt done` again.
+**Run `gt done` last.** It runs the rig's configured pre-submit command, which may check nothing, then submits (see You run no check). If that command fails, fix what its output names, commit and run `gt done` again.
 
 **Self-Cleaning Model:**
 Once `gt done` succeeds, you're gone. The command:
