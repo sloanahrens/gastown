@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
@@ -62,8 +63,11 @@ func captureWrites(t *testing.T, store *Store) <-chan State {
 	return written
 }
 
-// waitBound bounds every channel wait a heartbeat test makes, so a regression
-// that stops a write or an error callback fails the test instead of hanging it.
+// waitBound bounds the channel waits of the heartbeat tests and of the
+// blocked-probe drain test, so a regression that stops a write or an error
+// callback fails the test instead of hanging it. Those tests run in a synctest
+// bubble, so the bound is the bubble's fake clock: it advances only when every
+// goroutine is durably blocked, and host load cannot fire it.
 const waitBound = 2 * time.Second
 
 // receiveWithin takes one value from ch, failing the test with what it was
@@ -115,6 +119,7 @@ func startHeartbeat(t *testing.T, store *Store, ticks <-chan time.Time, clock Cl
 		RunHeartbeat(ctx, store, ticks, clock, onError)
 	}()
 	t.Cleanup(func() {
+		// Runs inside the bubble, before synctest.Test returns, so cancel ends RunHeartbeat.
 		cancel()
 		select {
 		case <-finished:
@@ -127,6 +132,10 @@ func startHeartbeat(t *testing.T, store *Store, ticks <-chan time.Time, clock Cl
 
 func TestHeartbeatRewritesOnEveryTick(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testHeartbeatRewritesOnEveryTick)
+}
+
+func testHeartbeatRewritesOnEveryTick(t *testing.T) {
 	store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
 	base := fullState()
 	if err := store.Write(base); err != nil {
@@ -174,8 +183,9 @@ func TestHeartbeatRewritesOnEveryTick(t *testing.T) {
 func TestHeartbeatStopsWithContextAndReportsErrors(t *testing.T) {
 	t.Parallel()
 
-	t.Run("publish failure is reported and the loop continues", func(t *testing.T) {
-		t.Parallel()
+	// Each subtest gets its own bubble: t.Run and t.Parallel cannot run inside
+	// one, so the body is a named closure that t.Run hands to synctest.Test.
+	publishFailure := func(t *testing.T) {
 		store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
 		if err := store.Write(fullState()); err != nil {
 			t.Fatalf("Write: %v", err)
@@ -210,10 +220,13 @@ func TestHeartbeatStopsWithContextAndReportsErrors(t *testing.T) {
 		if got := writes.Load(); got != 2 {
 			t.Errorf("staged %d writes, want 2: the loop stopped on the first error", got)
 		}
+	}
+	t.Run("publish failure is reported and the loop continues", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, publishFailure)
 	})
 
-	t.Run("no state yet is reported and the loop continues", func(t *testing.T) {
-		t.Parallel()
+	noStateYet := func(t *testing.T) {
 		store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
 		errs := make(chan error, 2)
 		ticks := make(chan time.Time)
@@ -231,19 +244,25 @@ func TestHeartbeatStopsWithContextAndReportsErrors(t *testing.T) {
 
 		cancel()
 		receiveWithin(t, done, "RunHeartbeat to return after ctx cancellation")
+	}
+	t.Run("no state yet is reported and the loop continues", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, noStateYet)
 	})
 
-	t.Run("closed ticks end the loop", func(t *testing.T) {
-		t.Parallel()
+	closedTicks := func(t *testing.T) {
 		store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
 		ticks := make(chan time.Time)
 		close(ticks)
 		_, done := startHeartbeat(t, store, ticks, &fakeClock{}, func(error) {})
 		receiveWithin(t, done, "RunHeartbeat to return when ticks is closed")
+	}
+	t.Run("closed ticks end the loop", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, closedTicks)
 	})
 
-	t.Run("a nil onError is allowed and the loop continues", func(t *testing.T) {
-		t.Parallel()
+	nilOnError := func(t *testing.T) {
 		store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
 		if err := store.Write(fullState()); err != nil {
 			t.Fatalf("Write: %v", err)
@@ -265,6 +284,10 @@ func TestHeartbeatStopsWithContextAndReportsErrors(t *testing.T) {
 
 		cancel()
 		receiveWithin(t, done, "RunHeartbeat to return after ctx cancellation")
+	}
+	t.Run("a nil onError is allowed and the loop continues", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, nilOnError)
 	})
 }
 
