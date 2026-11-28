@@ -25,8 +25,15 @@ func forgejoDriftDeployment(image string) map[string]any {
 	}
 }
 
+// forgejoDriftNamed is forgejoDriftDeployment under another name.
+func forgejoDriftNamed(name, image string) map[string]any {
+	obj := forgejoDriftDeployment(image)
+	obj["metadata"].(map[string]any)["name"] = name
+	return obj
+}
+
 // TestCompareForgejoDrift runs the compare over one Deployment against a fake
-// kubectl that answers with the live object (gt-51i8oi).
+// kubectl that answers with the live object (gt-51i8oi, gt-31jbuc).
 func TestCompareForgejoDrift(t *testing.T) {
 	t.Parallel()
 	// live is the object the cluster answers with: the same fields, plus the
@@ -47,19 +54,26 @@ func TestCompareForgejoDrift(t *testing.T) {
 		}
 	}
 	manifest := []map[string]any{forgejoDriftDeployment("forgejo:14")}
+	const imageLine = "deployment/forgejo: spec.template.spec.containers[0].image: rendered sha256:"
+	imageException := driftException{Object: "Deployment/forgejo/forgejo", Path: "spec.template.spec.containers[0].image", Reason: "pinned by the operator", Owner: "ops"}
 	cases := []struct {
-		name      string
-		objects   []map[string]any
-		kubectl   func(context.Context, string, []string, string, ...string) (string, int, error)
-		wantErr   []string
-		wantLines int
-		wantDiff  bool
-		noRead    bool
+		name       string
+		objects    []map[string]any
+		exceptions []driftException
+		kubectl    func(context.Context, string, []string, string, ...string) (string, int, error)
+		wantErr    []string
+		wantLines  int
+		wantLine   string
+		wantDiff   bool
+		noRead     bool
 	}{
 		{name: "an equal live answer prints nothing", objects: manifest, kubectl: answer(live("forgejo:14"), 0)},
-		{name: "a changed image prints one line", objects: manifest, kubectl: answer(live("forgejo:15"), 0), wantLines: 1, wantDiff: true},
+		{name: "a changed image prints one line", objects: manifest, kubectl: answer(live("forgejo:15"), 0), wantLines: 1, wantLine: imageLine, wantDiff: true},
+		{name: "an explained image prints explained and does not set differed", objects: manifest, exceptions: []driftException{imageException}, kubectl: answer(live("forgejo:15"), 0), wantLines: 1, wantLine: "deployment/forgejo: explained: spec.template.spec.containers[0].image: rendered sha256:"},
+		{name: "an exception for another object explains nothing", objects: manifest, exceptions: []driftException{{Object: "Deployment/forgejo/other", Path: imageException.Path}}, kubectl: answer(live("forgejo:15"), 0), wantLines: 1, wantLine: imageLine, wantDiff: true},
+		{name: "an exception for another path explains nothing", objects: manifest, exceptions: []driftException{{Object: imageException.Object, Path: "spec.replicas"}}, kubectl: answer(live("forgejo:15"), 0), wantLines: 1, wantLine: imageLine, wantDiff: true},
 		{name: "a failed read names the object", objects: manifest, kubectl: answer("", 1), wantErr: []string{"Deployment/forgejo", "could not be read"}},
-		{name: "an absent object names the object", objects: manifest, kubectl: answer("", 0), wantErr: []string{"Deployment/forgejo", "does not hold deployment/forgejo"}},
+		{name: "an absent object prints one line and sets differed", objects: manifest, kubectl: answer("", 0), wantLines: 1, wantLine: "deployment/forgejo: the object is absent from the cluster", wantDiff: true},
 		{name: "a live answer with no fields names the object", objects: manifest, kubectl: answer("{}", 0), wantErr: []string{"Deployment/forgejo", "no fields to compare"}},
 		{name: "a refused target names the object and reads nothing", objects: []map[string]any{forgejoObject("Secret", "forgejo", "forgejo")}, kubectl: answer("", 0), wantErr: []string{"Secret/forgejo", "kind the drift compare does not read"}, noRead: true},
 		{name: "no kubectl runner refuses the compare", objects: manifest, wantErr: []string{"no kubectl read runner"}},
@@ -75,7 +89,7 @@ func TestCompareForgejoDrift(t *testing.T) {
 					return tc.kubectl(ctx, dir, env, name, args...)
 				}
 			}
-			differed, err := compareForgejoDrift(context.Background(), d, tc.objects)
+			differed, err := compareForgejoDrift(context.Background(), d, tc.objects, tc.exceptions)
 			if len(tc.wantErr) == 0 && err != nil {
 				t.Fatalf("compareForgejoDrift() error = %v, want none", err)
 			}
@@ -94,13 +108,51 @@ func TestCompareForgejoDrift(t *testing.T) {
 			if len(lines) != tc.wantLines {
 				t.Fatalf("printed %d lines %q, want %d", len(lines), out.String(), tc.wantLines)
 			}
-			if tc.wantLines == 1 && !strings.HasPrefix(lines[0], "deployment/forgejo: spec.template.spec.containers[0].image: rendered sha256:") {
-				t.Errorf("printed %q, want the image line under deployment/forgejo", lines[0])
+			if tc.wantLine != "" && !strings.HasPrefix(lines[0], tc.wantLine) {
+				t.Errorf("printed %q, want a line starting %q", lines[0], tc.wantLine)
 			}
 			if differed != tc.wantDiff {
 				t.Errorf("differed = %v, want %v", differed, tc.wantDiff)
 			}
 		})
+	}
+}
+
+// TestCompareForgejoDriftAbsentIsDrift: an object the cluster does not hold is one
+// line and sets differed, and the object after it is still compared (gt-31jbuc).
+func TestCompareForgejoDriftAbsentIsDrift(t *testing.T) {
+	t.Parallel()
+	changed, err := json.Marshal(forgejoDriftNamed("forgejo-proxy", "forgejo:15"))
+	if err != nil {
+		t.Fatalf("encoding the live object: %v", err)
+	}
+	objects := []map[string]any{forgejoDriftDeployment("forgejo:14"), forgejoDriftNamed("forgejo-proxy", "forgejo:14")}
+	var out bytes.Buffer
+	d := clusterDriftDeps{out: &out, kubectl: func(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+		if args[1] == "deployment/forgejo" {
+			return "", 0, nil
+		}
+		return string(changed), 0, nil
+	}}
+	differed, err := compareForgejoDrift(context.Background(), d, objects, nil)
+	if err != nil {
+		t.Fatalf("compareForgejoDrift() error = %v, want none", err)
+	}
+	if !differed {
+		t.Errorf("differed = false, want true for an absent object")
+	}
+	want := []string{
+		"deployment/forgejo: the object is absent from the cluster",
+		"deployment/forgejo-proxy: spec.template.spec.containers[0].image: rendered sha256:",
+	}
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != len(want) {
+		t.Fatalf("printed %q, want %d lines", out.String(), len(want))
+	}
+	for i := range want {
+		if !strings.HasPrefix(lines[i], want[i]) {
+			t.Errorf("line %d = %q, want a line starting %q", i, lines[i], want[i])
+		}
 	}
 }
 
