@@ -17,7 +17,8 @@ type Entry struct {
 	DiskPath string
 }
 
-// Store is the cache the server answers requests from.
+// Store is the cache the server answers requests from. Serve calls its methods
+// concurrently, so an implementation must be safe for concurrent use.
 type Store interface {
 	// Get returns the entry for actionID, or ErrMiss when the store has none.
 	Get(actionID []byte) (Entry, error)
