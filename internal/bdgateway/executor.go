@@ -360,8 +360,9 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	// set once its wait returns. A sink gets the result on every ending,
 	// including a refusal that started no child, where it stays nil.
 	var cpuMS *int64
+	var stdoutBytes *int64
 	if sink, ok := frames.(ExecResultSink); ok {
-		defer func() { sink.SetExecResult(ExecResult{CPUMS: cpuMS}) }()
+		defer func() { sink.SetExecResult(ExecResult{CPUMS: cpuMS, StdoutBytes: stdoutBytes}) }()
 	}
 	body, err := readStdin(stdin)
 	if err != nil {
@@ -484,6 +485,7 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	// after the kill, so the ends this side owns are closed and the reads end.
 	// The errors those closes cause are the close's, not bd's, so they are not
 	// read as bd failing.
+	pumpsEnded := true
 	for pending := 2; pending > 0; {
 		select {
 		case err := <-pumpErrs:
@@ -516,12 +518,14 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 					case fw.writesInProgress() > 0 && inWriteBefore:
 						record(fmt.Errorf("%w: the client stopped reading its stream, %d pump(s) still writing %s after the call ended", errFrameWrite, pending, e.killGrace))
 						fw.discard.Store(true) // the lock is held by the blocked write, so stop writing without it
+						pumpsEnded = false
 						pending = 0
 					case fw.writesInProgress() > 0:
 						inWriteBefore = true
 						grace.Reset(e.killGrace)
 					case idleGraces >= maxPumpGraces:
 						record(fmt.Errorf("bdgateway: %d stream pump(s) did not end within %d grace periods of the call's end", pending, maxPumpGraces))
+						pumpsEnded = false
 						pending = 0
 					default:
 						inWriteBefore = false
@@ -532,6 +536,10 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 			}
 			grace.Stop()
 		}
+	}
+	if pumpsEnded {
+		n := fw.stdoutBytes.Load()
+		stdoutBytes = &n
 	}
 	// The stdin write is bounded the same way: closing our end ends it even
 	// when the child's reader is a process the group kill missed.
@@ -632,6 +640,8 @@ type ExecResult struct {
 	// read from its process state after Wait; nil when the call started no
 	// child or its wait ended with no reading.
 	CPUMS *int64
+	// StdoutBytes is bd's framed stdout bytes, read once both pumps ended; nil when no child started or a pump outlived the call.
+	StdoutBytes *int64
 }
 
 // ExecResultSink is a frames writer that keeps the executor's result for the
@@ -992,7 +1002,8 @@ type frameWriter struct {
 	mu sync.Mutex
 	w  io.Writer
 	// stderr is the stderr pump's head, kept for the call's log line.
-	stderr stderrHead
+	stderr      stderrHead
+	stdoutBytes atomic.Int64
 	// writing counts the writes in progress or waiting for the lock. A pump that
 	// is only slow to be scheduled is not in a write; one blocked on a client that
 	// stopped reading is, and that is what the drain after a call's end tells
@@ -1032,6 +1043,9 @@ func (f *frameWriter) sendAll(frames ...Frame) error {
 	for _, fr := range frames {
 		if err := WriteFrame(f.w, fr); err != nil {
 			return err
+		}
+		if fr.Kind == FrameStdout {
+			f.stdoutBytes.Add(int64(len(fr.Payload)))
 		}
 	}
 	return nil
