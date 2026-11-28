@@ -1424,6 +1424,62 @@ func TestDindRequestsValidateAgainstTheLimit(t *testing.T) {
 	}
 }
 
+// TestRunnerNameRendersEveryObject drives Values.Name: every object name, the name
+// label, the selector and each volume's reference derive from the stem, and a site
+// still naming the constant fails its own row. The goldens pin an empty Name.
+func TestRunnerNameRendersEveryObject(t *testing.T) {
+	t.Parallel()
+	const stem = "forgejo-runner-aux"
+	named := goldenValues()
+	named.Name = stem
+	m := mustBuild(t, named)
+	pod := m.Deployment.Spec.Template.Spec
+	configVol := volumeNamed(t, pod.Volumes, configVolume).ConfigMap
+	dataVol := volumeNamed(t, pod.Volumes, runnerDataVolume).PersistentVolumeClaim
+	dindVol := volumeNamed(t, pod.Volumes, dindDataVolume).PersistentVolumeClaim
+	if configVol == nil || dataVol == nil || dindVol == nil {
+		t.Fatal("a volume carries no source, so it references no object")
+	}
+	for _, tc := range []struct{ name, got, want string }{
+		{"the Deployment", m.Deployment.Metadata.Name, stem},
+		{"the ConfigMap", m.ConfigMap.Metadata.Name, stem + "-config"},
+		{"the engine claim", m.DindClaim.Metadata.Name, stem + "-dind"},
+		{"the data claim", m.RunnerClaim.Metadata.Name, stem + "-data"},
+		{"the config volume's ConfigMap", configVol.Name, stem + "-config"},
+		{"the data volume's claim", dataVol.ClaimName, stem + "-data"},
+		{"the engine volume's claim", dindVol.ClaimName, stem + "-dind"},
+		{"the Deployment's name label", m.Deployment.Metadata.Labels["app.kubernetes.io/name"], stem},
+		{"the ConfigMap's name label", m.ConfigMap.Metadata.Labels["app.kubernetes.io/name"], stem},
+		{"the engine claim's name label", m.DindClaim.Metadata.Labels["app.kubernetes.io/name"], stem},
+		{"the data claim's name label", m.RunnerClaim.Metadata.Labels["app.kubernetes.io/name"], stem},
+		{"the pod template's name label", m.Deployment.Spec.Template.Metadata.Labels["app.kubernetes.io/name"], stem},
+		{"the selector", m.Deployment.Spec.Selector.MatchLabels["app.kubernetes.io/name"], stem},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// TestRunnerNameIsRefused drives Values.Name's validation: a stem that is not a
+// DNS-1123 label, and one longer than the cap, are refused with the field named.
+func TestRunnerNameIsRefused(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, stem string }{
+		{"a bad character", "forgejo_runner"},
+		{"longer than the cap", strings.Repeat("a", maxNameLength+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := goldenValues()
+			v.Name = tc.stem
+			if _, err := Build(v); err == nil || !strings.Contains(err.Error(), "Values.Name") {
+				t.Errorf("Build with Values.Name %q = %v, want a refusal naming the field", tc.stem, err)
+			}
+		})
+	}
+}
+
 // TestConfigYAMLQuotesAnyLabel drives the scalar quoting: a label holding a
 // single quote and a YAML comment character must read back as the label it was,
 // not as a document a reader would have to repair.
