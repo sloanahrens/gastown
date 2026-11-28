@@ -82,6 +82,25 @@ const (
 	ciEngineMegabyte = 1 << 20
 )
 
+// pruneName is the schedule key, the job ledger name and the attention key stem of
+// r's engine prune. The gate runner's is ciEnginePruneName; the aux runner's carries
+// its deployment, so one runner's last run is never another's.
+func (r ciCacheRunner) pruneName() string {
+	if r == ciCacheGateRunner {
+		return ciEnginePruneName
+	}
+	return ciEnginePruneName + "-" + r.deployment
+}
+
+// logTag names r's engine prune in its log lines, its attention label and its hold
+// key. The gate runner's is empty, so its lines are unchanged.
+func (r ciCacheRunner) logTag() string {
+	if r == ciCacheGateRunner {
+		return ""
+	}
+	return " (" + r.deployment + ")"
+}
+
 // The outcomes an engine prune run records in the job ledger. A failed run is
 // "failed"; a run that reached its verdict is "ok", except that a build cache step
 // which reclaimed nothing while docker reported reclaimable cache before it records
@@ -322,10 +341,10 @@ func ciEngineBuildCacheReport(out []byte) (reclaimed int64, known bool, verdict 
 // reclaimed nothing although docker reported reclaimable cache before them, and the
 // cache is still over the keep size. It names the age prune's filter and keep flag and
 // the cap prune's flag, so the operator sees which passes ran and with what limits.
-func ciEngineZeroReclaimWarn(reclaimable int64, unusedAge time.Duration, keepBytes int64) string {
+func ciEngineZeroReclaimWarn(r ciCacheRunner, reclaimable int64, unusedAge time.Duration, keepBytes int64) string {
 	size := ciEngineKeepStorageSize(keepBytes)
-	return fmt.Sprintf("disk_maintenance: ci engine prune: WARN: the build cache prune reclaimed %s and the cap prune reclaimed %s, though docker system df reported %s reclaimable before them; the age prune ran with --filter until=%s and %s %s, the cap prune with %s %s, so the cache stayed over the keep size",
-		polecatimage.Human(0), polecatimage.Human(0), polecatimage.Human(reclaimable), ciEngineUntil(unusedAge), ciEngineKeepStorageFlag, size, ciEngineMaxUsedSpaceFlag, size)
+	return fmt.Sprintf("disk_maintenance: ci engine prune%s: WARN: the build cache prune reclaimed %s and the cap prune reclaimed %s, though docker system df reported %s reclaimable before them; the age prune ran with --filter until=%s and %s %s, the cap prune with %s %s, so the cache stayed over the keep size",
+		r.logTag(), polecatimage.Human(0), polecatimage.Human(0), polecatimage.Human(reclaimable), ciEngineUntil(unusedAge), ciEngineKeepStorageFlag, size, ciEngineMaxUsedSpaceFlag, size)
 }
 
 // ciEngineCapReclaimed reads the cap prune's output the way ciEngineBuildCacheReport
@@ -1138,7 +1157,7 @@ func (d *Daemon) runCIEnginePruneTick() {
 		d.refuseDiskMaintenance(err)
 		return
 	}
-	if !d.diskMaintSchedule.trimDue(ciEnginePruneName, now, every) {
+	if !d.diskMaintSchedule.trimDue(ciCacheGateRunner.pruneName(), now, every) {
 		return
 	}
 	mode, err := diskMaintenanceMode(pc)
@@ -1151,13 +1170,14 @@ func (d *Daemon) runCIEnginePruneTick() {
 	}
 	s.dispatch(func() {
 		defer d.ciEnginePruneRunning.Store(false)
-		d.runCIEnginePrunePass(mode)
+		d.runCIEnginePrunePass(ciCacheGateRunner, mode)
 	})
 }
 
-// runCIEnginePrunePass is the pass the tick dispatches. The due check is read again
-// here, so a run that concluded after the tick's decision does not run twice.
-func (d *Daemon) runCIEnginePrunePass(mode string) {
+// runCIEnginePrunePass is the pass the tick dispatches, over the runner it is given.
+// The due check is read again here, so a run that concluded after the tick's
+// decision does not run twice.
+func (d *Daemon) runCIEnginePrunePass(runner ciCacheRunner, mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
 	s := d.diskMaintenanceSeams()
@@ -1166,12 +1186,12 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 		d.refuseDiskMaintenance(err)
 		return
 	}
-	if !d.diskMaintSchedule.trimDue(ciEnginePruneName, s.now(), every) {
+	if !d.diskMaintSchedule.trimDue(runner.pruneName(), s.now(), every) {
 		return
 	}
-	verdict, reason := d.ciEnginePrune(ctx, mode)
+	verdict, reason := d.ciEnginePrune(ctx, runner, mode)
 	concluded := s.now()
-	d.diskMaintConclude(ctx, ciEnginePruneName, "CI engine prune", verdict, concluded, every, reason)
+	d.diskMaintConclude(ctx, runner.pruneName(), "CI engine prune"+runner.logTag(), verdict, concluded, every, reason)
 }
 
 // ciEngineReasonLine is the failure reason the attention item carries: the first
@@ -1197,7 +1217,7 @@ func ciEngineReasonLine(s string) string { return strings.SplitN(s, "\n", 2)[0] 
 // failed running-task read plans no orphan, logs once, and leaves the rest of the
 // prune as it was; a planned orphan is removed with docker rm -f, and an orphan
 // docker leaves in place fails the run like any other kind.
-func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, reason string) {
+func (d *Daemon) ciEnginePrune(ctx context.Context, runner ciCacheRunner, mode string) (verdict bool, reason string) {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
 	started := s.now()
@@ -1209,7 +1229,7 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	defer func() {
 		ended := s.now()
 		run := jobledger.Run{
-			Job:       ciEnginePruneName,
+			Job:       runner.pruneName(),
 			StartedAt: started,
 			EndedAt:   ended,
 			Outcome:   outcome,
@@ -1221,10 +1241,10 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 			next := ended.Add(every)
 			run.NextDue = &next
 		}
-		d.recordCIEnginePruneRun(run)
+		d.recordCIEnginePruneRun(runner, run)
 	}()
 	if err != nil {
-		d.ciEnginePruneLogf("settings", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
+		d.ciEnginePruneLogf(runner, "settings", ": %v; nothing pruned", err)
 		return false, ciEngineReasonLine(err.Error())
 	}
 	// A bad orphan age fails the run, like any other setting it cannot act on.
@@ -1234,47 +1254,46 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	}
 	orphanAge, err := engineSettings.CIEngineOrphanJobAgeDuration()
 	if err != nil {
-		d.ciEnginePruneLogf("settings", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
+		d.ciEnginePruneLogf(runner, "settings", ": %v; nothing pruned", err)
 		return false, ciEngineReasonLine(err.Error())
 	}
 	kubeContext, _, err := ciCacheTrimContext(pc)
 	if err != nil {
-		d.ciEnginePruneLogf("context", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
+		d.ciEnginePruneLogf(runner, "context", ": %v; nothing pruned", err)
 		return false, ciEngineReasonLine(err.Error())
 	}
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, s.getenv)
-	pod, err := d.ciCacheTrimPod(ctx, ciCacheGateRunner, kubeconfig, kubeContext)
+	pod, err := d.ciCacheTrimPod(ctx, runner, kubeconfig, kubeContext)
 	if err != nil {
 		// The lookup's error can carry kubectl's stderr, so only the sentinel's text
 		// or the exit status is logged and carried.
 		if errors.Is(err, errCICacheTrimNotRunning) {
-			d.ciEnginePruneLogf("pod not running", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
+			d.ciEnginePruneLogf(runner, "pod not running", ": %v; nothing pruned", err)
 			return false, ciEngineReasonLine(err.Error())
 		}
-		d.ciEnginePruneLogf("pod lookup", "disk_maintenance: ci engine prune: the runner's pod lookup failed (%s); nothing pruned", ciEngineExitStatus(err))
+		d.ciEnginePruneLogf(runner, "pod lookup", ": the runner's pod lookup failed (%s); nothing pruned", ciEngineExitStatus(err))
 		return false, fmt.Sprintf("the runner's pod lookup failed (%s)", ciEngineExitStatus(err))
 	}
+	at := ciCacheExecTarget{runner: runner, kubeconfig: kubeconfig, kubeContext: kubeContext, pod: pod}
 
 	// A failed exec's log line names its exit status and the first line of its
 	// stderr, bounded; ciEngineFailure never lets stdout or a second line through.
-	stdout, stderr, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext,
-		"exec", "-n", ciCacheNamespace, pod, "-c", ciCacheContainer, "--",
-		"sh", "-c", ciEngineListScript, "ci-engine-list", ciEngineRoot)
+	stdout, stderr, err := d.ciEngineExec(ctx, at, "sh", "-c", ciEngineListScript, "ci-engine-list", ciEngineRoot)
 	listing, err := ciEngineListFromExec(stdout, stderr, err)
 	if err != nil {
-		d.ciEnginePruneLogf("listing", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
+		d.ciEnginePruneLogf(runner, "listing", ": %v; nothing pruned", err)
 		return false, ciEngineReasonLine(err.Error())
 	}
 	// A failed running-task read plans no orphan and fails nothing else.
 	running, readErr := s.runningTasks(ctx)
 	if readErr != nil {
-		d.ciEnginePruneLogf("running tasks", "disk_maintenance: ci engine prune: the running task ids could not be read: %v; no orphan is planned this run", readErr)
+		d.ciEnginePruneLogf(runner, "running tasks", ": the running task ids could not be read: %v; no orphan is planned this run", readErr)
 		running = nil
 	}
 	now := s.now()
 	plan, err := planCIEnginePrune(listing, now, imageAge, unusedAge, keepRepos, ciEngineOrphanRule{age: orphanAge, running: running})
 	if err != nil {
-		d.ciEnginePruneLogf("plan refused", "disk_maintenance: ci engine prune: the listing could not be planned: %v; nothing pruned", err)
+		d.ciEnginePruneLogf(runner, "plan refused", ": the listing could not be planned: %v; nothing pruned", err)
 		return false, ciEngineReasonLine(fmt.Sprintf("the listing could not be planned: %v", err))
 	}
 
@@ -1293,7 +1312,7 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	capped, remaining := ciEngineCappedPlan(plan, maxPerKind)
 	plan = capped
 	if remaining.containers > 0 || remaining.images > 0 || remaining.volumes > 0 {
-		d.logger.Printf("disk_maintenance: ci engine prune: %d container(s), %d image(s), %d volume(s) remain for a later run, over ci_engine_prune_max_per_kind %d",
+		d.ciEngineLogf(runner, ": %d container(s), %d image(s), %d volume(s) remain for a later run, over ci_engine_prune_max_per_kind %d",
 			remaining.containers, remaining.images, remaining.volumes, maxPerKind)
 	}
 	counts := ciEngineRemovalCounts(ciEngineRemovals(plan))
@@ -1303,21 +1322,21 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	}
 	if mode != agentconfig.DiskMaintenanceModeApply {
 		for _, c := range plan.containers {
-			d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove container %s", c.ID[:12])
+			d.ciEngineLogf(runner, " dry_run: would remove container %s", c.ID[:12])
 		}
 		for _, img := range plan.images {
-			d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove image %s %v", strings.TrimPrefix(img.ID, "sha256:")[:12], img.RepoTags)
+			d.ciEngineLogf(runner, " dry_run: would remove image %s %v", strings.TrimPrefix(img.ID, "sha256:")[:12], img.RepoTags)
 		}
 		for _, v := range plan.volumes {
-			d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove volume %s", v.Name)
+			d.ciEngineLogf(runner, " dry_run: would remove volume %s", v.Name)
 		}
 		for _, c := range plan.orphans {
-			d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove orphan container %s", c.ID[:12])
+			d.ciEngineLogf(runner, " dry_run: would remove orphan container %s", c.ID[:12])
 		}
 		for _, c := range plan.keptRunning {
-			d.logger.Printf("disk_maintenance: ci engine prune dry_run: leaves container %s alone, task still running in Forgejo", c.ID[:12])
+			d.ciEngineLogf(runner, " dry_run: leaves container %s alone, task still running in Forgejo", c.ID[:12])
 		}
-		d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove %s, of %s, and prune build cache (not sized in a dry run); nothing removed%s",
+		d.ciEngineLogf(runner, " dry_run: would remove %s, of %s, and prune build cache (not sized in a dry run); nothing removed%s",
 			counts, before, orphanVerdict)
 		// The build cache step did not run, so no build_cache_bytes is recorded.
 		outcome = ciEngineOutcomeOK
@@ -1335,9 +1354,9 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 			// a created container holds: re-read what the containers use and drop the
 			// planned images one now references. A re-read that fails sends no image
 			// command and fails the run, once logged.
-			kept, dropped, readErr := d.ciEngineImagesSkipInUse(ctx, kubeconfig, kubeContext, pod, r)
+			kept, dropped, readErr := d.ciEngineImagesSkipInUse(ctx, at, r)
 			if readErr != nil {
-				d.ciEnginePruneLogf("in-use read", "disk_maintenance: ci engine prune: %v; no image is removed this run", readErr)
+				d.ciEnginePruneLogf(runner, "in-use read", ": %v; no image is removed this run", readErr)
 				removals[i] = ciEngineRemoval{kind: r.kind}
 				failed = true
 				if reason == "" {
@@ -1346,7 +1365,7 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 				continue
 			}
 			if len(dropped) > 0 {
-				d.logger.Printf("disk_maintenance: ci engine prune: skipped %d planned image(s) a container now references: %s", len(dropped), ciEngineShortImages(dropped))
+				d.ciEngineLogf(runner, ": skipped %d planned image(s) a container now references: %s", len(dropped), ciEngineShortImages(dropped))
 			}
 			removals[i] = kept
 			if len(kept.ids) == 0 {
@@ -1354,7 +1373,7 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 			}
 			r = kept
 		}
-		ok, why := d.ciEngineRemoveKind(ctx, kubeconfig, kubeContext, pod, r)
+		ok, why := d.ciEngineRemoveKind(ctx, at, r)
 		if !ok {
 			failed = true
 			if reason == "" {
@@ -1368,20 +1387,20 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	// The build cache is sized once, before its prune, through the same exec: the
 	// prune's total is read against what docker said was reclaimable. A failed size
 	// read skips that check and nothing else.
-	reclaimable, reclaimErr := d.ciEngineBuildCacheReclaimable(ctx, kubeconfig, kubeContext, pod)
+	reclaimable, reclaimErr := d.ciEngineBuildCacheReclaimable(ctx, at)
 	if reclaimErr != nil {
-		d.ciEnginePruneLogf("reclaimable unreadable", "disk_maintenance: ci engine prune: the build cache's reclaimable size could not be read before its prune: %v; the zero-reclaim check is skipped", reclaimErr)
+		d.ciEnginePruneLogf(runner, "reclaimable unreadable", ": the build cache's reclaimable size could not be read before its prune: %v; the zero-reclaim check is skipped", reclaimErr)
 	}
 	cache := "build cache prune failed"
 	zeroReclaim := false
 	var reclaimed int64
 	reclaimedKnown := false
-	if pruned, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(unusedAge, keepBytes)...); err != nil {
-		d.ciEnginePruneLogf("build cache prune failed", "disk_maintenance: ci engine prune: the build cache prune in the %s container failed (%s); the run is retried",
-			ciCacheContainer, ciEngineFailure(err, stderr))
+	if pruned, stderr, err := d.ciEngineExec(ctx, at, ciEngineBuildCachePruneArgv(unusedAge, keepBytes)...); err != nil {
+		d.ciEnginePruneLogf(runner, "build cache prune failed", ": the build cache prune in the %s container failed (%s); the run is retried",
+			runner.container, ciEngineFailure(err, stderr))
 		failed = true
 		if reason == "" {
-			reason = fmt.Sprintf("the build cache prune in the %s container failed (%s)", ciCacheContainer, ciEngineFailure(err, stderr))
+			reason = fmt.Sprintf("the build cache prune in the %s container failed (%s)", runner.container, ciEngineFailure(err, stderr))
 		}
 	} else {
 		var verdict string
@@ -1396,12 +1415,12 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	// reclaimed. An unread figure, or an age prune that failed, leaves the excess
 	// unknown, so no cap prune is sent.
 	if over, usable := ciEngineCacheOverKeep(reclaimable, reclaimErr == nil, reclaimed, reclaimedKnown, keepBytes); usable && over > 0 {
-		if capOut, capStderr, capErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCacheCapArgv(keepBytes)...); capErr != nil {
-			d.ciEnginePruneLogf("cap prune failed", "disk_maintenance: ci engine prune: the cap prune in the %s container failed (%s); the run is retried",
-				ciCacheContainer, ciEngineFailure(capErr, capStderr))
+		if capOut, capStderr, capErr := d.ciEngineExec(ctx, at, ciEngineBuildCacheCapArgv(keepBytes)...); capErr != nil {
+			d.ciEnginePruneLogf(runner, "cap prune failed", ": the cap prune in the %s container failed (%s); the run is retried",
+				runner.container, ciEngineFailure(capErr, capStderr))
 			failed = true
 			if reason == "" {
-				reason = fmt.Sprintf("the cap prune in the %s container failed (%s)", ciCacheContainer, ciEngineFailure(capErr, capStderr))
+				reason = fmt.Sprintf("the cap prune in the %s container failed (%s)", runner.container, ciEngineFailure(capErr, capStderr))
 			}
 		} else {
 			capReclaimed, capKnown, capText := ciEngineCapReclaimed(capOut)
@@ -1414,17 +1433,17 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 			// prune could still have removed cache over the keep size.
 			if capKnown && capReclaimed == 0 && reclaimedKnown && reclaimed == 0 {
 				zeroReclaim = true
-				d.logger.Printf("%s", ciEngineZeroReclaimWarn(reclaimable, unusedAge, keepBytes))
+				d.logger.Printf("%s", ciEngineZeroReclaimWarn(runner, reclaimable, unusedAge, keepBytes))
 			}
 		}
 	}
-	afterKiB, err := d.ciEngineDataRootKiB(ctx, kubeconfig, kubeContext, pod)
+	afterKiB, err := d.ciEngineDataRootKiB(ctx, at)
 	if err != nil {
-		d.ciEnginePruneLogf("size unreadable", "disk_maintenance: ci engine prune: the data root's size after could not be read: %v; the run is retried", err)
+		d.ciEnginePruneLogf(runner, "size unreadable", ": the data root's size after could not be read: %v; the run is retried", err)
 		return false, ciEngineReasonLine(fmt.Sprintf("the data root's size after could not be read: %v", err))
 	}
 	if failed {
-		d.logger.Printf("disk_maintenance: ci engine prune: a removal failed; the engine is %s, from %s; %s; the run is retried", polecatimage.Human(afterKiB*1024), before, cache)
+		d.ciEngineLogf(runner, ": a removal failed; the engine is %s, from %s; %s; the run is retried", polecatimage.Human(afterKiB*1024), before, cache)
 		return false, reason
 	}
 	outcome = ciEngineOutcomeOK
@@ -1433,22 +1452,23 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 		// it was allowed to remove from a cache docker called reclaimable.
 		outcome = ""
 	}
-	d.logger.Printf("disk_maintenance: ci engine prune: removed %s, %s to %s; %s%s",
+	d.ciEngineLogf(runner, ": removed %s, %s to %s; %s%s",
 		counts, before, polecatimage.Human(afterKiB*1024), cache, orphanVerdict)
 	return true, ""
 }
 
-// recordCIEnginePruneRun appends one run to the town's job ledger. A ledger that
-// cannot be opened or appended is logged once and never changes the prune's own
-// result: the ledger is a record of what the job did, not part of doing it.
-func (d *Daemon) recordCIEnginePruneRun(run jobledger.Run) {
+// recordCIEnginePruneRun appends one run of r's engine prune to the town's job
+// ledger. A ledger that cannot be opened or appended is logged once and never
+// changes the prune's own result: the ledger is a record of what the job did, not
+// part of doing it.
+func (d *Daemon) recordCIEnginePruneRun(r ciCacheRunner, run jobledger.Run) {
 	ledger, err := d.diskMaintenanceSeams().jobLedger()
 	if err != nil {
-		d.ciEnginePruneLogf("job ledger", "disk_maintenance: ci engine prune: the job ledger could not be opened (%v); the run is not recorded", err)
+		d.ciEnginePruneLogf(r, "job ledger", ": the job ledger could not be opened (%v); the run is not recorded", err)
 		return
 	}
 	if err := ledger.Append(run); err != nil {
-		d.ciEnginePruneLogf("job ledger", "disk_maintenance: ci engine prune: the run could not be recorded (%v)", err)
+		d.ciEnginePruneLogf(r, "job ledger", ": the run could not be recorded (%v)", err)
 	}
 }
 
@@ -1458,8 +1478,8 @@ func (d *Daemon) recordCIEnginePruneRun(run jobledger.Run) {
 // re-read that cannot run, or whose output is not image ids, returns an error and
 // no removal: the caller fails the run and sends no image command. The ids dropped
 // are returned for the log.
-func (d *Daemon) ciEngineImagesSkipInUse(ctx context.Context, kubeconfig, kubeContext, pod string, r ciEngineRemoval) (ciEngineRemoval, []string, error) {
-	out, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, "sh", "-c", ciEngineInUseImagesScript, "ci-engine-in-use")
+func (d *Daemon) ciEngineImagesSkipInUse(ctx context.Context, at ciCacheExecTarget, r ciEngineRemoval) (ciEngineRemoval, []string, error) {
+	out, stderr, err := d.ciEngineExec(ctx, at, "sh", "-c", ciEngineInUseImagesScript, "ci-engine-in-use")
 	if err != nil {
 		return ciEngineRemoval{}, nil, fmt.Errorf("the in-use read failed (%s)", ciEngineFailure(err, stderr))
 	}
@@ -1477,17 +1497,17 @@ func (d *Daemon) ciEngineImagesSkipInUse(ctx context.Context, kubeconfig, kubeCo
 // answer is docker's own report, then one presence inspect over the ids it did
 // not print. A failure is logged here, naming the kind, the exit status and the
 // first line of docker's stderr, and is returned as the item's reason.
-func (d *Daemon) ciEngineRemoveKind(ctx context.Context, kubeconfig, kubeContext, pod string, r ciEngineRemoval) (bool, string) {
-	stdout, stderr, runErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, r.argv...)
+func (d *Daemon) ciEngineRemoveKind(ctx context.Context, at ciCacheExecTarget, r ciEngineRemoval) (bool, string) {
+	stdout, stderr, runErr := d.ciEngineExec(ctx, at, r.argv...)
 	missing := ciEngineMissing(r, stdout)
 	if len(missing) == 0 {
 		return true, ""
 	}
 	// The inspect exits 1 whenever one of the ids is gone, so only a failure to run
 	// it at all, not a status, stops the answer.
-	seen, seenErr, inspectErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, r.presenceArgv(missing)...)
+	seen, seenErr, inspectErr := d.ciEngineExec(ctx, at, r.presenceArgv(missing)...)
 	if !ciEngineRan(inspectErr) {
-		d.ciEnginePruneLogf("presence "+r.kind, "disk_maintenance: ci engine prune: the %s presence check could not run (%s); the run is retried", r.kind, ciEngineFailure(inspectErr, seenErr))
+		d.ciEnginePruneLogf(at.runner, "presence "+r.kind, ": the %s presence check could not run (%s); the run is retried", r.kind, ciEngineFailure(inspectErr, seenErr))
 		return false, fmt.Sprintf("the %s presence check could not run (%s)", r.kind, ciEngineFailure(inspectErr, seenErr))
 	}
 	present := ciEnginePresent(r.dockerKind(), seen)
@@ -1500,10 +1520,10 @@ func (d *Daemon) ciEngineRemoveKind(ctx context.Context, kubeconfig, kubeContext
 	if left == 0 {
 		return true, ""
 	}
-	d.ciEnginePruneLogf("not removed "+r.kind, "disk_maintenance: ci engine prune: docker left %d of %d planned %s(s) in the %s container (the removal ended: %s); the run is retried",
-		left, len(r.ids), r.kind, ciCacheContainer, ciEngineFailure(runErr, stderr))
+	d.ciEnginePruneLogf(at.runner, "not removed "+r.kind, ": docker left %d of %d planned %s(s) in the %s container (the removal ended: %s); the run is retried",
+		left, len(r.ids), r.kind, at.runner.container, ciEngineFailure(runErr, stderr))
 	return false, fmt.Sprintf("docker left %d of %d planned %s(s) in the %s container (the removal ended: %s)",
-		left, len(r.ids), r.kind, ciCacheContainer, ciEngineFailure(runErr, stderr))
+		left, len(r.ids), r.kind, at.runner.container, ciEngineFailure(runErr, stderr))
 }
 
 // ciEngineRan reports whether an exec reached its program: it succeeded or the
@@ -1614,11 +1634,11 @@ func ciEngineKubectlExitReportLine(err error, line string) bool {
 	return errors.As(err, &status) && status.ExitCode() == code
 }
 
-// ciEngineExec runs one program in the runner's engine container with argv as
-// given: kubectl exec hands docker the words themselves, so no shell reads them.
-func (d *Daemon) ciEngineExec(ctx context.Context, kubeconfig, kubeContext, pod string, argv ...string) ([]byte, []byte, error) {
-	args := append([]string{"exec", "-n", ciCacheNamespace, pod, "-c", ciCacheContainer, "--"}, argv...)
-	return d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext, args...)
+// ciEngineExec runs one program in the engine container of the runner at, with argv
+// as given: kubectl exec hands docker the words themselves, so no shell reads them.
+func (d *Daemon) ciEngineExec(ctx context.Context, at ciCacheExecTarget, argv ...string) ([]byte, []byte, error) {
+	args := append([]string{"exec", "-n", at.runner.namespace, at.pod, "-c", at.runner.container, "--"}, argv...)
+	return d.ciCacheTrimKubectlRun(ctx, at.kubeconfig, at.kubeContext, args...)
 }
 
 // ciEngineDataRootKiB reads the data root's size in KiB through du -sk, whose
@@ -1628,8 +1648,8 @@ func (d *Daemon) ciEngineExec(ctx context.Context, kubeconfig, kubeContext, pod 
 // non-zero exit is a failure, and so is a vanished-file run with no figure. The
 // error names the failure the way every engine exec does: the exit status and the
 // first bounded stderr line, never stdout.
-func (d *Daemon) ciEngineDataRootKiB(ctx context.Context, kubeconfig, kubeContext, pod string) (int64, error) {
-	out, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, "du", "-sk", ciEngineRoot)
+func (d *Daemon) ciEngineDataRootKiB(ctx context.Context, at ciCacheExecTarget) (int64, error) {
+	out, stderr, err := d.ciEngineExec(ctx, at, "du", "-sk", ciEngineRoot)
 	failed := func() error { return fmt.Errorf("du of the data root failed (%s)", ciEngineFailure(err, stderr)) }
 	if err != nil && !ciEngineDuVanished(err, stderr) {
 		return 0, failed()
@@ -1656,8 +1676,8 @@ func (d *Daemon) ciEngineDataRootKiB(ctx context.Context, kubeconfig, kubeContex
 // the size is the first field after the kind and the reclaimable size the second,
 // which docker may follow with a percentage. An error names the exit status and the
 // bounded first stderr line, never stdout.
-func (d *Daemon) ciEngineBuildCacheReclaimable(ctx context.Context, kubeconfig, kubeContext, pod string) (int64, error) {
-	out, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, "docker", "system", "df", "--format", ciEngineSizeReportFormat)
+func (d *Daemon) ciEngineBuildCacheReclaimable(ctx context.Context, at ciCacheExecTarget) (int64, error) {
+	out, stderr, err := d.ciEngineExec(ctx, at, "docker", "system", "df", "--format", ciEngineSizeReportFormat)
 	if err != nil {
 		return 0, fmt.Errorf("docker system df failed (%s)", ciEngineFailure(err, stderr))
 	}
@@ -1766,12 +1786,20 @@ func ciEngineListFromExec(stdout, stderr []byte, runErr error) (ciEngineListing,
 	return listing, nil
 }
 
-// ciEnginePruneLogf logs one refusal or failure line of the engine prune, at most
+// ciEngineLogf logs one line of r's engine prune. format completes the line after
+// "disk_maintenance: ci engine prune" and r's tag, so the gate runner's lines read
+// as they always have.
+func (d *Daemon) ciEngineLogf(r ciCacheRunner, format string, args ...any) {
+	d.logger.Printf("disk_maintenance: ci engine prune"+r.logTag()+format, args...)
+}
+
+// ciEnginePruneLogf logs one refusal or failure line of r's engine prune, at most
 // once an hour for the same kind of fault, as the cache trim's lines are held. The
-// hold keys on kind, so the engine's lines do not share the cache trim's.
-func (d *Daemon) ciEnginePruneLogf(kind, format string, args ...any) {
-	if d.diskMaintSchedule.allowLog("ci-engine-prune "+kind, d.diskMaintenanceSeams().now(), cacheTrimRefusalLogInterval) {
-		d.logger.Printf("%s", fmt.Sprintf(format, args...))
+// hold keys on kind and the runner, so the engine's lines do not share the cache
+// trim's, nor one runner's the other's.
+func (d *Daemon) ciEnginePruneLogf(r ciCacheRunner, kind, format string, args ...any) {
+	if d.diskMaintSchedule.allowLog("ci-engine-prune"+r.logTag()+" "+kind, d.diskMaintenanceSeams().now(), cacheTrimRefusalLogInterval) {
+		d.ciEngineLogf(r, format, args...)
 	}
 }
 
