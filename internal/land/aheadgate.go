@@ -59,6 +59,43 @@ func (s *AheadSlot) Start(ctx context.Context, bead, head, base string, run func
 	return true
 }
 
+// Take waits for the held car to finish, then empties the slot and returns the
+// gate and true when the car matches bead, head and base and its run returned no
+// error. A failed run empties the slot and returns false. A key that differs in
+// any of the three, or an empty slot, returns false and leaves the car held. If
+// ctx ends first, Take returns false and the car stays held. Take holds no lock
+// while it waits.
+func (s *AheadSlot) Take(ctx context.Context, bead, head, base string) (AheadGate, bool) {
+	if s == nil {
+		return AheadGate{}, false
+	}
+	s.mu.Lock()
+	car := s.car
+	s.mu.Unlock()
+	if car == nil || car.bead != bead || car.head != head || car.base != base {
+		return AheadGate{}, false
+	}
+	select {
+	case <-car.done:
+	default:
+		select {
+		case <-car.done:
+		case <-ctx.Done():
+			return AheadGate{}, false
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.car != car {
+		return AheadGate{}, false
+	}
+	s.car = nil
+	if car.err != nil {
+		return AheadGate{}, false
+	}
+	return car.gate, true
+}
+
 // Pending reports the key of the held car and whether one is held, also after
 // its run returned. A nil or empty slot holds nothing.
 func (s *AheadSlot) Pending() (bead, head, base string, ok bool) {

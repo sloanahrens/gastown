@@ -2,6 +2,7 @@ package land
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"testing/synctest"
 )
@@ -124,6 +125,125 @@ func TestAheadSlotPendingNamesTheHeldCar(t *testing.T) {
 		}
 		if bead, head, base, ok := s.Pending(); !ok || bead != "gt-a" || head != "h1" || base != "main" {
 			t.Errorf("Pending after the run returned = (%q, %q, %q, %v), want the car still held", bead, head, base, ok)
+		}
+	})
+}
+
+// finished is a run that returns gate and err at once.
+func finished(gate AheadGate, err error) func(context.Context, func(string)) (AheadGate, error) {
+	return func(context.Context, func(string)) (AheadGate, error) { return gate, err }
+}
+
+// TestAheadSlotTakeWaitsForTheRunAndReturnsItOnce shows a matching Take blocked
+// until the held run returns, then handed its gate once with the slot empty.
+func TestAheadSlotTakeWaitsForTheRunAndReturnsItOnce(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		release := make(chan struct{})
+		want := AheadGate{Result: CandidateResult{State: CandidatePassed}}
+		var s AheadSlot
+		if !s.Start(ctx, "gt-a", "h1", "main", func(ctx context.Context, _ func(string)) (AheadGate, error) {
+			select {
+			case <-release:
+				return want, nil
+			case <-ctx.Done():
+				return AheadGate{}, ctx.Err()
+			}
+		}, nil) {
+			t.Fatal("Start on an empty slot = false, want true")
+		}
+		gates := make(chan AheadGate, 1)
+		oks := make(chan bool, 1)
+		go func() {
+			g, ok := s.Take(ctx, "gt-a", "h1", "main")
+			gates <- g
+			oks <- ok
+		}()
+		synctest.Wait()
+		select {
+		case <-gates:
+			t.Fatal("Take returned before the run ended")
+		default:
+		}
+		close(release)
+		synctest.Wait()
+		select {
+		case gate := <-gates:
+			if ok := <-oks; !ok || gate != want {
+				t.Fatalf("Take = (%+v, %v), want (%+v, true)", gate, ok, want)
+			}
+		default:
+			t.Fatal("Take did not return after the run ended")
+		}
+		if _, ok := s.Take(ctx, "gt-a", "h1", "main"); ok {
+			t.Error("second Take = true, want false: a result is taken once")
+		}
+		if _, _, _, ok := s.Pending(); ok {
+			t.Error("Pending after Take = held, want empty")
+		}
+	})
+}
+
+// TestAheadSlotTakeLeavesACarThatDiffersHeld shows a Take differing in bead,
+// head or base returning false with the car still held, so a later matching
+// Take succeeds.
+func TestAheadSlotTakeLeavesACarThatDiffersHeld(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, bead, head, base string }{
+		{"differs in bead", "gt-x", "h1", "main"},
+		{"differs in head", "gt-a", "h9", "main"},
+		{"differs in base", "gt-a", "h1", "other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				var s AheadSlot
+				if !s.Start(ctx, "gt-a", "h1", "main", finished(AheadGate{}, nil), nil) {
+					t.Fatal("Start on an empty slot = false, want true")
+				}
+				synctest.Wait()
+				if _, ok := s.Take(ctx, tc.bead, tc.head, tc.base); ok {
+					t.Fatal("Take with a differing key = true, want false")
+				}
+				if bead, head, base, ok := s.Pending(); !ok || bead != "gt-a" || head != "h1" || base != "main" {
+					t.Fatalf("Pending after a differing Take = (%q, %q, %q, %v), want the car still held", bead, head, base, ok)
+				}
+				if _, ok := s.Take(ctx, "gt-a", "h1", "main"); !ok {
+					t.Fatal("matching Take after a differing Take = false, want true")
+				}
+			})
+		})
+	}
+}
+
+// TestAheadSlotTakeEmptiesAFailedRun shows a failed run's Take returning false
+// with the slot emptied, and a nil or empty slot handing back nothing.
+func TestAheadSlotTakeEmptiesAFailedRun(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var off *AheadSlot
+		if _, ok := off.Take(ctx, "gt-a", "h1", "main"); ok {
+			t.Error("Take on a nil slot = true, want false")
+		}
+		var empty AheadSlot
+		if _, ok := empty.Take(ctx, "gt-a", "h1", "main"); ok {
+			t.Error("Take on an empty slot = true, want false")
+		}
+		var s AheadSlot
+		if !s.Start(ctx, "gt-a", "h1", "main", finished(AheadGate{}, errors.New("gate: push refused")), nil) {
+			t.Fatal("Start on an empty slot = false, want true")
+		}
+		synctest.Wait()
+		if _, ok := s.Take(ctx, "gt-a", "h1", "main"); ok {
+			t.Fatal("Take of a failed run = true, want false")
+		}
+		if _, _, _, ok := s.Pending(); ok {
+			t.Fatal("Pending after a failed run was taken = held, want empty")
 		}
 	})
 }
