@@ -93,6 +93,7 @@ type ciCacheFixture struct {
 	exec      cliReply
 	npmExec   cliReply
 	gomodExec cliReply
+	stats     cliReply // the cache program's stats read; absent by default
 }
 
 // newCICacheFixture builds the fixture for mode: a running runner pod and a
@@ -111,6 +112,7 @@ func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 		exec:      ciCacheGocacheExecReply(mode, 40<<20, 3, 10<<20),
 		npmExec:   ciCacheReply(512<<10, 0, 512<<10),
 		gomodExec: ciCacheReply(512<<10, 0, 512<<10),
+		stats:     cliReply{code: 3, stderr: "stats file not found\n"},
 	}
 	f.cli = newFakeCLIFor(func(c cliCall) cliReply {
 		verb := cacheTrimVerb(c.args)
@@ -119,6 +121,8 @@ func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 			return f.pods
 		case strings.HasPrefix(verb, "exec "):
 			switch {
+			case slices.Contains(c.args, ciCacheProgStatsPath):
+				return f.stats
 			case slices.Contains(c.args, ciCacheVolumeRoot(ciCacheNpmVolume)):
 				return f.npmExec
 			case slices.Contains(c.args, ciCacheVolumeRoot(ciCacheGomodVolume)):
@@ -334,8 +338,8 @@ func TestCICacheTrimArgv(t *testing.T) {
 		f.drain()
 
 		execs := f.execs()
-		if len(execs) != len(ciCacheVolumes) {
-			t.Fatalf("ran %d execs, want %d: one per volume", len(execs), len(ciCacheVolumes))
+		if len(execs) != len(ciCacheVolumes)+1 {
+			t.Fatalf("ran %d execs, want %d: one per volume and the stats read", len(execs), len(ciCacheVolumes)+1)
 		}
 		argv := execs[0].args
 		wantPrefix := diskmaint.KubectlArgs(diskMaintKubeconfig(f.d.config.TownRoot, func(string) string { return "" }), ciCacheTestContext)
@@ -350,7 +354,7 @@ func TestCICacheTrimArgv(t *testing.T) {
 			t.Errorf("exec argv = %q\nwant %q", argv[4:], want)
 		}
 
-		npm := execs[1].args
+		npm := execs[2].args
 		wantNpm := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
 			"sh", "-c", ciCacheCappedTrimScript, "ci-cache-trim", ciCacheVolumeRoot(ciCacheNpmVolume), ciCacheTestMinutes, ciCacheTestNpmCapKiB}
 		if !slices.Equal(npm[4:], wantNpm) {
@@ -398,8 +402,8 @@ func TestCICacheTrimGocacheRunsTheLRUProgram(t *testing.T) {
 	f.tick()
 	f.drain()
 
-	if n := len(f.execs()); n != len(ciCacheVolumes) {
-		t.Fatalf("ran %d execs, want %d: one per volume", n, len(ciCacheVolumes))
+	if n := len(f.execs()); n != len(ciCacheVolumes)+1 {
+		t.Fatalf("ran %d execs, want %d: one per volume and the stats read", n, len(ciCacheVolumes)+1)
 	}
 	argvOf := func(root string) []string {
 		for _, c := range f.execs() {
@@ -706,8 +710,8 @@ func TestCICacheTrimSchedule(t *testing.T) {
 			t.Fatalf("a second tick while the pass runs dispatched %d passes, want 1", len(f.pending))
 		}
 		f.drain()
-		if n := len(f.execs()); n != len(ciCacheVolumes) {
-			t.Fatalf("ran %d execs, want %d: one per volume", n, len(ciCacheVolumes))
+		if n := len(f.execs()); n != len(ciCacheVolumes)+1 {
+			t.Fatalf("ran %d execs, want %d: one per volume and the stats read", n, len(ciCacheVolumes)+1)
 		}
 
 		f.at(15 * time.Minute)
@@ -723,8 +727,8 @@ func TestCICacheTrimSchedule(t *testing.T) {
 		f.at(60 * time.Minute)
 		f.tick()
 		f.drain()
-		if n := len(f.execs()); n != 2*len(ciCacheVolumes) {
-			t.Fatalf("ran %d execs at 60m, want %d: due an hour after its last verdict", n, 2*len(ciCacheVolumes))
+		if n := len(f.execs()); n != 2*(len(ciCacheVolumes)+1) {
+			t.Fatalf("ran %d execs at 60m, want %d: due an hour after its last verdict", n, 2*(len(ciCacheVolumes)+1))
 		}
 	})
 
@@ -734,8 +738,8 @@ func TestCICacheTrimSchedule(t *testing.T) {
 		f.d.maint.quiet = func(*Daemon) (bool, string) { return false, "a landing is in flight" }
 		f.tick()
 		f.drain()
-		if n := len(f.execs()); n != len(ciCacheVolumes) {
-			t.Fatalf("a busy town ran %d execs, want %d: the CI trim is off the quiet guard", n, len(ciCacheVolumes))
+		if n := len(f.execs()); n != len(ciCacheVolumes)+1 {
+			t.Fatalf("a busy town ran %d execs, want %d: the CI trim is off the quiet guard", n, len(ciCacheVolumes)+1)
 		}
 		if strings.Contains(f.logs.String(), "skipped") {
 			t.Errorf("the busy tick logged a skip for the CI trim, which is not held back: %q", f.logs.String())
@@ -956,8 +960,8 @@ func TestCICacheTrimPodNamesTheRunningPod(t *testing.T) {
 
 			execs := f.execs()
 			if tt.want == "" {
-				if len(execs) != len(ciCacheVolumes) {
-					t.Fatalf("ran %d execs, want %d: one per volume", len(execs), len(ciCacheVolumes))
+				if len(execs) != len(ciCacheVolumes)+1 {
+					t.Fatalf("ran %d execs, want %d: one per volume and the stats read", len(execs), len(ciCacheVolumes)+1)
 				}
 				for _, c := range execs {
 					if !slices.Contains(c.args, ciCacheTestPod) {
@@ -2589,5 +2593,84 @@ func TestCICacheLedgerRefusedLedgerChangesNothing(t *testing.T) {
 				t.Errorf("across two attempts the refused ledger was logged %d time(s), want once\n%s", n, f.logs.String())
 			}
 		})
+	}
+}
+
+// ciCacheProgStatsPath is the cache program's stats file in its volume (gt-0lo0iw).
+var ciCacheProgStatsPath = ciCacheVolumeRoot(ciGocacheprogVolume) + "/stats.jsonl"
+
+// ciCacheProgCollects returns the execs that read the cache program's stats file.
+func ciCacheProgCollects(f *ciCacheFixture) []cliCall {
+	return slices.DeleteFunc(f.execs(), func(c cliCall) bool { return !slices.Contains(c.args, ciCacheProgStatsPath) })
+}
+
+// TestCICacheProgCollectApplyRunsOnce: an apply of ci-gocache reads the stats file
+// once, through the pass's exec target, after its own trim exec.
+func TestCICacheProgCollectApplyRunsOnce(t *testing.T) {
+	t.Parallel()
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	f.stats = cliReply{stdout: ciGocacheprogStatsLine + "\n"}
+	f.tick()
+	f.drain()
+	execs := f.execs()
+	trim := slices.IndexFunc(execs, func(c cliCall) bool { return slices.Contains(c.args, ciCacheTestGocacheRoot) })
+	collect := slices.IndexFunc(execs, func(c cliCall) bool { return slices.Contains(c.args, ciCacheProgStatsPath) })
+	if n := len(ciCacheProgCollects(f)); n != 1 || collect < trim {
+		t.Fatalf("ran %d stats read(s), the read at exec %d and the trim at %d; want one, after the trim", n, collect, trim)
+	}
+	want := "exec -n " + ciCacheNamespace + " " + ciCacheTestPod + " -c " + ciCacheContainer + " -- sh -c "
+	if got := cacheTrimVerb(execs[collect].args); execs[collect].args[3] != ciCacheTestContext || !strings.HasPrefix(got, want) {
+		t.Errorf("the stats read ran %q, want the pass's context and an exec beginning %q", got, want)
+	}
+}
+
+// TestCICacheProgCollectNoCall: a dry run, an apply whose ci-gocache exec or reply
+// fails, and an apply where only the other volumes are due read the stats file none times.
+func TestCICacheProgCollectNoCall(t *testing.T) {
+	t.Parallel()
+	apply := agentconfig.DiskMaintenanceModeApply
+	for _, tc := range []struct {
+		name, mode string
+		exec       cliReply
+		hold       bool
+	}{
+		{"a dry run", agentconfig.DiskMaintenanceModeDryRun, cliReply{}, false},
+		{"an apply whose exec fails", apply, cliReply{stderr: "error: unable to upgrade connection\n", code: 1}, false},
+		{"an apply whose reply cannot be read", apply, cliReply{stdout: "du: cannot access the path\n"}, false},
+		{"an apply where only the other volumes are due", apply, cliReply{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, tc.mode)
+			f.stats = cliReply{stdout: ciGocacheprogStatsLine + "\n"}
+			if tc.exec != (cliReply{}) {
+				f.exec = tc.exec
+			}
+			if tc.hold {
+				f.d.diskMaintSchedule.record(ciCacheVolumeSchedule(ciCacheVolumes[0]), ciCacheTestStart)
+			}
+			f.tick()
+			f.drain()
+			if n := len(ciCacheProgCollects(f)); n != 0 {
+				t.Errorf("ran %d stats read(s), want none", n)
+			}
+		})
+	}
+}
+
+// TestCICacheProgCollectFailureKeepsTheVerdict: a failed stats read is logged, and
+// the apply of ci-gocache still reaches its verdict ok in the same run.
+func TestCICacheProgCollectFailureKeepsTheVerdict(t *testing.T) {
+	t.Parallel()
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	f.stats = cliReply{code: 1, stderr: "mv: cannot stat\ncommand terminated with exit code 1\n"}
+	if ok := f.d.ciCacheTrim(context.Background(), agentconfig.DiskMaintenanceModeApply); !ok {
+		t.Fatalf("the pass returned false with only the stats read failed:\n%s", f.logs.String())
+	}
+	if n := len(ciCacheProgCollects(f)); n != 1 || !strings.Contains(f.logs.String(), ciGocacheprogVolume+": the stats file could not be read") {
+		t.Errorf("ran %d stats read(s) and logged:\n%s\nwant one read, logged as unreadable", n, f.logs.String())
+	}
+	if !strings.Contains(f.logs.String(), ciCacheGocacheVolume+": removed 3 ") {
+		t.Errorf("ci-gocache's trim did not reach its verdict:\n%s", f.logs.String())
 	}
 }
