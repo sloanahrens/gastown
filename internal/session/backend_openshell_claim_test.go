@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,26 +62,28 @@ func TestOpenshellHalfMadeClaim(t *testing.T) {
 }
 
 // TestOpenshellHalfMadeClaimRefuses: a bad name, a registry that cannot be made,
-// a lock that cannot be opened and a claim that cannot be written are errors
-// with no claim, and a failed write leaves the lock free (gt-5dw70j).
+// and a lock that cannot be opened are errors wrapping errClaimNotTaken with no
+// claim. A claim that cannot be written under the lock returns the claim still
+// holding it, with an error that does not wrap errClaimNotTaken; Unlock frees
+// the lock (gt-5dw70j).
 func TestOpenshellHalfMadeClaimRefuses(t *testing.T) {
 	t.Parallel()
 	const session = "gt-box"
 	cases := []struct {
 		name, session, wantErr string
 		block                  func(t *testing.T, town string)
-		probe                  bool
+		notTaken               bool
 	}{
-		{"bad session name", "../gt-box", "bad session name", nil, false},
+		{"bad session name", "../gt-box", "bad session name", nil, true},
 		{"registry cannot be made", session, "creating the sandbox registry", func(t *testing.T, town string) {
 			must(t, os.WriteFile(filepath.Join(town, ".runtime"), nil, 0o600))
-		}, false},
+		}, true},
 		{"lock cannot be opened", session, "locking the sandbox claim", func(t *testing.T, town string) {
 			must(t, os.MkdirAll(sandboxClaimLockPath(town, session), 0o755))
-		}, false},
+		}, true},
 		{"claim cannot be written", session, "writing the sandbox claim", func(t *testing.T, town string) {
 			must(t, os.MkdirAll(sandboxClaimPath(town, session), 0o755))
-		}, true},
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,21 +96,31 @@ func TestOpenshellHalfMadeClaimRefuses(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("writeSandboxClaim = %v, want an error naming %q", err, tc.wantErr)
 			}
-			if c != nil {
-				t.Fatal("a failed write returned a claim")
+			if got := errors.Is(err, errClaimNotTaken); got != tc.notTaken {
+				t.Fatalf("errors.Is(err, errClaimNotTaken) = %v, want %v: %v", got, tc.notTaken, err)
 			}
 			if info, err := os.Stat(sandboxClaimPath(town, tc.session)); err == nil && info.Mode().IsRegular() {
 				t.Error("a failed write left a claim file")
 			}
-			if tc.probe {
-				requireSandboxLockFree(t, town, tc.session)
+			if tc.notTaken {
+				if c != nil {
+					t.Fatal("a failure before the lock returned a claim")
+				}
+				return
 			}
+			if c == nil {
+				t.Fatal("a failed write under the lock returned no claim, so nothing could release the lock")
+			}
+			requireSandboxLockHeld(t, town, tc.session)
+			must(t, c.Unlock())
+			requireSandboxLockFree(t, town, tc.session)
 		})
 	}
 }
 
 // TestOpenshellHalfMadeClaimRefusesHeldLock: a write while another holder has
-// the lock is refused, names the lock and leaves no claim (gt-5dw70j).
+// the lock is refused, wraps errClaimNotTaken, names the lock and leaves no
+// claim (gt-5dw70j).
 func TestOpenshellHalfMadeClaimRefusesHeldLock(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -120,6 +133,9 @@ func TestOpenshellHalfMadeClaimRefusesHeldLock(t *testing.T) {
 	c, err := writeSandboxClaim(town, session, "gw")
 	if err == nil || !strings.Contains(err.Error(), sandboxClaimLockPath(town, session)) {
 		t.Fatalf("writeSandboxClaim = %v, want an error naming the lock", err)
+	}
+	if !errors.Is(err, errClaimNotTaken) {
+		t.Errorf("a write refused by another holder does not wrap errClaimNotTaken: %v", err)
 	}
 	if c != nil {
 		t.Fatal("a refused write returned a claim")
@@ -173,6 +189,16 @@ func requireSandboxLockFree(t *testing.T, town, session string) {
 		t.Fatalf("sandbox claim lock not free: TryLock = %v, %v", ok, err)
 	}
 	must(t, probe.Unlock())
+}
+
+// requireSandboxLockHeld fails the test unless session's lock is held by
+// another open handle.
+func requireSandboxLockHeld(t *testing.T, town, session string) {
+	t.Helper()
+	probe := flock.New(sandboxClaimLockPath(town, session))
+	if ok, err := probe.TryLock(); ok || err != nil {
+		t.Fatalf("sandbox claim lock not held: TryLock = %v, %v", ok, err)
+	}
 }
 
 func must(t *testing.T, err error) {
