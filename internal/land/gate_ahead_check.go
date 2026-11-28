@@ -33,3 +33,27 @@ func (l *Lander) gateAheadBeadCheck(w Work) error {
 	}
 	return nil
 }
+
+// gateAheadCheck is the whole read-only check that says a submission may be
+// gated ahead of its turn: the bead checks, the head check, then each of the
+// lander's RangeChecks on base..head, in the order precheckCar runs them. It
+// returns the first error or rejection, naming the check it came from, and
+// writes nothing to the bead (gt-gh6ago).
+func (l *Lander) gateAheadCheck(g Repo, w Work, base string) error {
+	if err := l.gateAheadBeadCheck(w); err != nil {
+		return err
+	}
+	if err := l.gateAheadHeadCheck(g, w); err != nil {
+		return err
+	}
+	for i, check := range l.RangeChecks {
+		rej, err := check(g, base, w.Head)
+		if err != nil {
+			return &InfraError{Stage: "range check", Err: err}
+		}
+		if rej != nil {
+			return fmt.Errorf("range check %d: %w", i, rej)
+		}
+	}
+	return nil
+}
