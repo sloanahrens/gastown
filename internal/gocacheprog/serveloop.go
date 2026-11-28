@@ -8,30 +8,40 @@ import (
 )
 
 // Serve answers the go command's requests from store until a close request or
-// the end of in, and reports what it counted.
+// the end of in, and reports what it counted. It writes every response through
+// one responder, so the counts are the responder's, and an exit that would
+// return nil returns the responder's first write error instead.
 func Serve(ctx context.Context, in io.Reader, out io.Writer, store Store) (Stats, error) {
-	var stats Stats
-	if err := respond(out, &Response{ID: 0, KnownCommands: []Cmd{CmdGet, CmdPut, CmdClose}}); err != nil {
-		return stats, err
+	r := &responder{out: out}
+	finish := func(err error) (Stats, error) {
+		total, werr := r.read()
+		if err == nil {
+			err = werr
+		}
+		return total, err
 	}
-	r := NewReader(in)
+	if err := r.write(&Response{ID: 0, KnownCommands: []Cmd{CmdGet, CmdPut, CmdClose}}, Stats{}); err != nil {
+		return finish(err)
+	}
+	rd := NewReader(in)
 	for {
 		if err := ctx.Err(); err != nil {
-			return stats, err
+			return finish(err)
 		}
-		req, err := r.Next()
+		req, err := rd.Next()
 		if errors.Is(err, io.EOF) {
-			return stats, nil
+			return finish(nil)
 		}
 		if err != nil {
-			return stats, err
+			return finish(err)
 		}
-		resp, done := answer(req, store, &stats)
-		if err := respond(out, resp); err != nil {
-			return stats, err
+		var counts Stats
+		resp, done := answer(req, store, &counts)
+		if err := r.write(resp, counts); err != nil {
+			return finish(err)
 		}
 		if done {
-			return stats, nil
+			return finish(nil)
 		}
 	}
 }
