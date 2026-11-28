@@ -9,6 +9,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/jobledger"
 )
 
 // ciGocacheprogStatsCounts are the eight counts each stats line carries; the
@@ -190,4 +192,45 @@ func ciGocacheprogStderrLine(err error, stderr []byte) string {
 		}
 	}
 	return ""
+}
+
+// ciGocacheprogJob and ciGocacheprogStoreJob name the cache program's job ledger runs (gt-9626rx).
+const ciGocacheprogJob, ciGocacheprogStoreJob = "ci_gocacheprog", "ci_gocacheprog_store"
+
+// ciGocacheprogStats records the cache program's figures in the job ledger (gt-9626rx):
+// the summed counts, the store when an eviction is in the file, or one failed run on a
+// read error. An absent file records nothing. It returns nothing, so no verdict depends on it.
+func (d *Daemon) ciGocacheprogStats(ctx context.Context, at ciCacheExecTarget) {
+	started := d.diskMaintenanceSeams().now()
+	data, present, err := d.ciGocacheprogRead(ctx, at)
+	if !present {
+		return
+	}
+	ended := d.diskMaintenanceSeams().now()
+	if err != nil {
+		d.ciCacheTrimLogf("read ci-gocacheprog", "disk_maintenance: ci cache trim: ci-gocacheprog: the stats file could not be read: %v; the run is recorded failed", err)
+		d.appendCIGocacheprogRuns(jobledger.Run{Job: ciGocacheprogJob, StartedAt: started, EndedAt: ended, Outcome: ciCacheTrimOutcomeFailed})
+		return
+	}
+	counts, store := sumGocacheprogStats(data)
+	runs := []jobledger.Run{{Job: ciGocacheprogJob, StartedAt: started, EndedAt: ended, Outcome: ciCacheTrimOutcomeOK, Stats: counts}}
+	if store != nil {
+		runs = append(runs, jobledger.Run{Job: ciGocacheprogStoreJob, StartedAt: started, EndedAt: ended, Outcome: ciCacheTrimOutcomeOK, Stats: store})
+	}
+	d.appendCIGocacheprogRuns(runs...)
+}
+
+// appendCIGocacheprogRuns appends runs to the town's job ledger. A ledger that cannot
+// be opened or appended is logged once and changes no verdict.
+func (d *Daemon) appendCIGocacheprogRuns(runs ...jobledger.Run) {
+	ledger, err := d.diskMaintenanceSeams().jobLedger()
+	if err != nil {
+		d.ciCacheTrimLogf("job ledger ci-gocacheprog", "disk_maintenance: ci cache trim: ci-gocacheprog: the job ledger could not be opened (%v); the runs are not recorded", err)
+		return
+	}
+	for _, run := range runs {
+		if err := ledger.Append(run); err != nil {
+			d.ciCacheTrimLogf("job ledger ci-gocacheprog", "disk_maintenance: ci cache trim: ci-gocacheprog: the run could not be recorded (%v)", err)
+		}
+	}
 }

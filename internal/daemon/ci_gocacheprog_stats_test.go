@@ -1,12 +1,18 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log"
 	"maps"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/jobledger"
 )
 
 // ciGocacheprogStatsLine is one line the cache program appends (gt-l4bzgs). The
@@ -247,6 +253,72 @@ func TestCIGocacheprogReadRefusals(t *testing.T) {
 				t.Fatalf("%s = present false with error %v; only an absent volume or file is a clean absence", row.name, err)
 			case !strings.Contains(err.Error(), row.want):
 				t.Fatalf("%s error %q; want it to name %q", row.name, err, row.want)
+			}
+		})
+	}
+}
+
+// gocacheprogLedgerFake keeps each run it is asked to append, and refuses each with err.
+type gocacheprogLedgerFake struct {
+	err  error
+	runs []jobledger.Run
+}
+
+func (l *gocacheprogLedgerFake) Append(run jobledger.Run) error {
+	l.runs = append(l.runs, run)
+	return l.err
+}
+
+// TestCIGocacheprogStatsLedger: a present file records its counts and an eviction its
+// store; an absent file records nothing; a read error one failed run; a refused ledger logs once.
+func TestCIGocacheprogStatsLedger(t *testing.T) {
+	t.Parallel()
+	countsRun := jobledger.Run{Job: "ci_gocacheprog", Outcome: ciCacheTrimOutcomeOK, Stats: ciGocacheprogStatsWant(ciGocacheprogStatsOne, 1, 0)}
+	evictRuns := []jobledger.Run{
+		{Job: "ci_gocacheprog", Outcome: ciCacheTrimOutcomeOK, Stats: ciGocacheprogStatsWant(ciGocacheprogEvictOne, 1, 0)},
+		{Job: "ci_gocacheprog_store", Outcome: ciCacheTrimOutcomeOK, Stats: ciGocacheprogEvictStoreOne},
+	}
+	rows := []struct {
+		name      string
+		reply     cliReply
+		appendErr error
+		openErr   error
+		want      []jobledger.Run
+		logged    string
+	}{
+		{"counts only", cliReply{stdout: ciGocacheprogStatsLine + "\n"}, nil, nil, []jobledger.Run{countsRun}, ""},
+		{"an eviction adds the store", cliReply{stdout: ciGocacheprogEvictLine + "\n"}, nil, nil, evictRuns, ""},
+		{"no file", cliReply{code: 3, stderr: "stats file not found\n"}, nil, nil, nil, ""},
+		{"a failed exec", cliReply{code: 1, stderr: "first line\nmv: cannot stat\ncommand terminated with exit code 1\n"}, nil, nil, []jobledger.Run{{Job: "ci_gocacheprog", Outcome: ciCacheTrimOutcomeFailed}}, "the stats file could not be read"},
+		{"an oversize file", cliReply{stdout: strings.Repeat("x", ciGocacheprogStatsMaxBytes+1)}, nil, nil, []jobledger.Run{{Job: "ci_gocacheprog", Outcome: ciCacheTrimOutcomeFailed}}, "the stats file could not be read"},
+		{"a refused append", cliReply{stdout: ciGocacheprogEvictLine + "\n"}, errors.New("no space left on device"), nil, evictRuns, "the run could not be recorded"},
+		{"a ledger that will not open", cliReply{stdout: ciGocacheprogEvictLine + "\n"}, nil, errors.New("jobledger: town root is empty"), nil, "the job ledger could not be opened"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			cli := newFakeCLIFor(func(cliCall) cliReply { return row.reply })
+			var logs bytes.Buffer
+			ledger := &gocacheprogLedgerFake{err: row.appendErr}
+			d := &Daemon{execCmd: cli.run, logger: log.New(&logs, "", 0)}
+			d.diskMaint.now = func() time.Time { return time.Unix(0, 0).UTC() }
+			d.diskMaint.jobLedger = func() (jobRunAppender, error) {
+				if row.openErr != nil {
+					return nil, row.openErr
+				}
+				return ledger, nil
+			}
+			d.ciGocacheprogStats(context.Background(), ciCacheExecTarget{runner: ciCacheGateRunner, kubeconfig: "kubeconfig", kubeContext: ciCacheTestContext, pod: ciCacheTestPod})
+			if !slices.EqualFunc(ledger.runs, row.want, func(a, b jobledger.Run) bool {
+				return a.Job == b.Job && a.Outcome == b.Outcome && maps.Equal(a.Stats, b.Stats)
+			}) {
+				t.Fatalf("appended %+v; want %+v", ledger.runs, row.want)
+			}
+			if row.logged == "" && logs.Len() != 0 {
+				t.Fatalf("logged %q; want nothing", logs.String())
+			}
+			if row.logged != "" && strings.Count(logs.String(), row.logged) != 1 {
+				t.Fatalf("logged %q; want %q once", logs.String(), row.logged)
 			}
 		})
 	}
