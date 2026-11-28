@@ -71,6 +71,19 @@ func TestReaderErrors(t *testing.T) {
 	}
 }
 
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+// A read error that is not EOF is reported, not mistaken for a clean end.
+func TestReaderReadError(t *testing.T) {
+	t.Parallel()
+	_, err := gocacheprog.NewReader(errReader{errors.New("boom")}).Next()
+	if err == nil || errors.Is(err, io.EOF) || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("Next = %v, want an error carrying boom", err)
+	}
+}
+
 func TestResponseJSON(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
