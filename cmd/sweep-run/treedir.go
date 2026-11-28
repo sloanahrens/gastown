@@ -21,6 +21,9 @@ type treeSweep struct {
 	// returns the exit status, or a negative value (sweepNoExit) when it produced
 	// none.
 	Run func(program string, args []string, dir string, env []string, stdout, stderr io.Writer) int
+	// Environ is the process environment the build and the run start from, with
+	// the sweep's overrides added on top (environWith).
+	Environ []string
 }
 
 // tempDir makes the directory the swept tree's sweep command is built into. It
