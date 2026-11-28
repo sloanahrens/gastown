@@ -117,3 +117,23 @@ func TestSandboxPerSeatBackupFailureChangesNothing(t *testing.T) {
 		t.Error("a write whose copy failed rewrote the settings file")
 	}
 }
+
+// A town that does not resolve stops the change before the file is read, so the
+// command returns the resolver's error and the file keeps its bytes, with no copy.
+func TestSandboxPerSeatUnresolvedTownChangesNothing(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, sandboxPerSeatSettings, "")
+	before := poolTestRawSettings(t, root)
+	noTown := func(string) (string, error) { return "", errors.New("no town here") }
+
+	err := runSandboxPerSeatCmd(&bytes.Buffer{}, noTown, "polecat-k8s", "off")
+	if err == nil || !strings.Contains(err.Error(), "no town here") {
+		t.Fatalf("per-seat off with no town = %v, want the resolver's error", err)
+	}
+	if after := poolTestRawSettings(t, root); after != before {
+		t.Error("an unresolved town rewrote the settings file")
+	}
+	if backups := sandboxResourcesBackups(t, root); len(backups) != 0 {
+		t.Errorf("an unresolved town made backups: %v", backups)
+	}
+}
