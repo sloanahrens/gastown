@@ -973,6 +973,68 @@ func TestFailureExcerptKeepsTheLinesAboveAGateVerdict(t *testing.T) {
 	}
 }
 
+// TestFailureExcerptVerdictWindowStopsAtAFailureBlock: the verdict's 15 lines
+// start no earlier than the line after an earlier "--- FAIL" block, so the note
+// carries that block once, with its own output, and does not reach back to
+// lines the block left out. The report lines between the block and the verdict
+// stay in the note (gt-b8mpxb).
+func TestFailureExcerptVerdictWindowStopsAtAFailureBlock(t *testing.T) {
+	t.Parallel()
+	got := failureExcerpt(gateJobLog(
+		"gate: build (the nested modules: daemon)",
+		"ok  \tgithub.com/x/aaa\t0.1s",
+		"gate: build finished",
+		"=== RUN   TestBlocked",
+		"--- FAIL: TestBlocked (0.01s)",
+		"    y_test.go:12: want 3, got 1",
+		"FAIL\tgithub.com/x/blocked\t0.2s",
+		"tierwall: github.com/x/cmd 30s",
+		"tierwall: slow tests",
+		"gate: FAILED at unit tier (unit): exit status 1",
+	), gateTailLines)
+	for _, want := range []string{
+		"--- FAIL: TestBlocked (0.01s)",
+		"    y_test.go:12: want 3, got 1",
+		"tierwall: github.com/x/cmd 30s",
+		"tierwall: slow tests",
+		"gate: FAILED at unit tier (unit): exit status 1",
+	} {
+		if n := strings.Count(got, want); n != 1 {
+			t.Errorf("excerpt carries %q %d times, want once:\n%s", want, n, got)
+		}
+	}
+	if strings.Contains(got, "gate: build (the nested modules: daemon)") {
+		t.Errorf("excerpt reaches back past the earlier failure block:\n%s", got)
+	}
+}
+
+// TestFailureExcerptReadsTheWholeLogForAVerdictOnlyTail: a red can end in only
+// the summary lines -- the gate's verdict, make's Error, the runner's exit code
+// -- and none of them names a failure, so a tail holding just those is no
+// source. The lint finding above it has to reach the note from the whole log;
+// counting the verdict as a test failure would read the tail alone and hide it
+// (gt-b8mpxb, gt-8bpwpx).
+func TestFailureExcerptReadsTheWholeLogForAVerdictOnlyTail(t *testing.T) {
+	t.Parallel()
+	finding := "internal/land/candidate.go:739:12: unused variable kept (unused)"
+	log := gateJobLog("⭐ Run Main actions/checkout@v4", finding) +
+		strings.Repeat(gateJobLog("ok  \tgithub.com/x/filler\t0.1s"), candidateTailBytes/40+1) +
+		gateJobLog("gate: FAILED at lint", "make: *** [Makefile:290: gate] Error 1", "[runner]: exitcode 2")
+	if len(log) <= candidateTailBytes {
+		t.Fatalf("log is %d bytes; want it past the %d-byte tail cap", len(log), candidateTailBytes)
+	}
+	if tail := log[len(log)-candidateTailBytes:]; strings.Contains(tail, finding) {
+		t.Fatalf("the tail holds the finding; the fixture does not exercise the verdict-only tail")
+	}
+	src := excerptSource(log)
+	if src != log {
+		t.Fatalf("excerptSource read %d of %d bytes; want the whole log", len(src), len(log))
+	}
+	if got := failureExcerpt(src, gateTailLines); !strings.Contains(got, finding) {
+		t.Errorf("excerpt %q does not name the finding above the summary-only tail", got)
+	}
+}
+
 // TestFailureExcerptNamesAUnitTierRuleReport: a package that fails only on a
 // unit-tier rule prints no failing test, only the report between its rule
 // lines, so the report has to reach the note from wherever it sits in the log

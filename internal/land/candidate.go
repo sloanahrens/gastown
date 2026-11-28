@@ -792,15 +792,20 @@ func failureLines(lines []string) []int {
 // failureSpan is the line range one failure marker carries. A "--- FAIL" block
 // runs to the next block boundary, so the test's own output comes with it; a
 // unit-tier rule report runs to its closing rule line, so the entries it names
-// come with it; the gate's verdict takes the report above it; any other marker
-// takes failureContextLines either side of itself.
+// come with it; the gate's verdict takes the report above it, back no further
+// than the failure block or report before it; any other marker takes
+// failureContextLines either side of itself.
 func failureSpan(lines []string, at int) (int, int) {
 	lo := max(at-failureContextLines, 0)
 	if ruleReportRE.MatchString(lines[at]) {
 		return lo, ruleReportEnd(lines, at)
 	}
 	if gateFailedRE.MatchString(lines[at]) {
-		return max(at-gateFailedLines, 0), at
+		lo := max(at-gateFailedLines, 0)
+		if end, ok := precedingBlockEnd(lines, at); ok {
+			lo = max(lo, min(end+1, at))
+		}
+		return lo, at
 	}
 	if !failedTestRE.MatchString(lines[at]) {
 		return lo, min(at+failureContextLines, len(lines)-1)
@@ -810,6 +815,27 @@ func failureSpan(lines []string, at int) (int, int) {
 		hi++
 	}
 	return lo, hi
+}
+
+// precedingBlockEnd is where the nearest "--- FAIL" block or unit-tier rule
+// report before at ends. The verdict's window starts after it, so an earlier
+// failure's block is neither repeated nor cut, and the report the verdict
+// closes keeps its whole run (gt-b8mpxb). A single-line marker -- a finding, a
+// "FAIL" package line -- names one line and does not shorten the window.
+func precedingBlockEnd(lines []string, at int) (int, bool) {
+	for i := at - 1; i >= 0; i-- {
+		if ruleReportRE.MatchString(lines[i]) {
+			return ruleReportEnd(lines, i), true
+		}
+		if failedTestRE.MatchString(lines[i]) {
+			hi := i
+			for hi+1 < len(lines) && !startsLogBlock(lines[hi+1]) {
+				hi++
+			}
+			return hi, true
+		}
+	}
+	return 0, false
 }
 
 // ruleReportEnd is the line a rule report ends on: the rule line that closes
