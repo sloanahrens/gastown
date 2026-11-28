@@ -60,6 +60,7 @@ func writeOnlyProblems(text string) []string {
 		"the rig's configured pre-submit command, which may check nothing",
 		"excerpt of the failing gate log",
 		"cannot reproduce it",
+		"Any other seat may reproduce it with the checks its directive names",
 		"`gt escalate` instead of guessing",
 	} {
 		if !strings.Contains(text, want) {
@@ -112,6 +113,7 @@ func TestPolecatFormulaSeatRunsNoCheck(t *testing.T) {
 		{"the excerpt is gone", strings.Replace(text, "excerpt of the failing gate log", "", 1), "lacks excerpt of the failing gate log"},
 		{"the reproduction claim is gone", strings.Replace(text, "cannot reproduce it", "", 1), "lacks cannot reproduce it"},
 		{"the escalation is gone", strings.Replace(text, "`gt escalate` instead of guessing", "", 1), "lacks `gt escalate` instead of guessing"},
+		{"the other seat's rework sentence is gone", strings.Replace(text, "Any other seat may reproduce it with the checks its directive names", "", 1), "lacks Any other seat may reproduce it with the checks its directive names"},
 		{"the directive condition is gone", strings.Replace(text, checkCondition, "every seat", 1), "lacks the directive condition " + checkCondition},
 		{"the unconditional heading is back", strings.Replace(text, "**Who runs checks.**", checkHeading, 1), "the unconditional heading You run no check is back"},
 		{"a pointer names the old heading", text + "\nNothing to run (see You run no check).\n", "a step points at You run no check"},

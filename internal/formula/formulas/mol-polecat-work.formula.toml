@@ -102,7 +102,7 @@ landing worker rejected a previous polecat's work. A `Rejection unchanged`
 section says your branch still sits on the commit that refusal judged, so the
 same content is refused again: change it to answer the findings, or escalate
 if the refusal did not come from this diff.
-Fix from the excerpt of the failing gate log and the code it names: the seat cannot reproduce it, so a run here proves nothing.
+Fix from the excerpt of the failing gate log and the code it names: a seat which runs no check cannot reproduce it, so a run here proves nothing. Any other seat may reproduce it with the checks its directive names (see Who runs checks).
 If the lines do not show the cause, `gt escalate` instead of guessing.
 
 If a prior branch exists, check it out instead of creating a new one:
