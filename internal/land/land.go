@@ -297,6 +297,9 @@ type Lander struct {
 	// repair bead (gt-xvw20). It runs on the landing's goroutine and must
 	// return promptly; the watch does its alerting off it.
 	CIFailure func(f CIFailure)
+	// CandidateBuilt, when set, is told the merge commit once per landing,
+	// just before the candidate gate runs on it (gt-49dh3n). Nil does nothing.
+	CandidateBuilt func(w Work, merged string)
 
 	// Ahead is the review-ahead store a review made before its landing is
 	// kept in, so the landing can reuse that verdict (gt-vq81d1). Nil means
