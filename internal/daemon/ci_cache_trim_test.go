@@ -2492,3 +2492,102 @@ func TestCICacheLedgerUncappedVolumeHasNoCapBytes(t *testing.T) {
 		t.Errorf("an uncapped volume recorded cap_bytes, want none: %v", runs[0].Stats)
 	}
 }
+
+// TestCICacheLedgerFailedAndDryRuns: an apply run whose program cannot be built,
+// whose exec fails or whose reply cannot be read records outcome failed with no
+// stats, since it measured nothing. A dry run removes nothing, so it records
+// nothing, whether it reaches a verdict or fails.
+func TestCICacheLedgerFailedAndDryRuns(t *testing.T) {
+	t.Parallel()
+	badRow := ciCacheVolume{name: ciCacheGocacheVolume, root: ciCacheTestGocacheRoot, lru: true, capKiB: -1}
+	execFail := cliReply{stderr: "error: unable to upgrade connection\n", code: 1}
+	for _, tc := range []struct {
+		name  string
+		mode  string
+		exec  cliReply
+		row   *ciCacheVolume
+		fails bool
+	}{
+		{name: "an apply whose program cannot be built", mode: agentconfig.DiskMaintenanceModeApply, row: &badRow, fails: true},
+		{name: "an apply whose exec fails", mode: agentconfig.DiskMaintenanceModeApply, exec: execFail, fails: true},
+		{name: "an apply whose reply cannot be read", mode: agentconfig.DiskMaintenanceModeApply, exec: cliReply{stdout: "du: cannot access the path\n"}, fails: true},
+		{name: "a dry run that reaches a verdict", mode: agentconfig.DiskMaintenanceModeDryRun},
+		{name: "a dry run that fails", mode: agentconfig.DiskMaintenanceModeDryRun, exec: execFail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, tc.mode)
+			if tc.row != nil {
+				at := ciCacheExecTarget{runner: ciCacheGateRunner, kubeconfig: "kubeconfig", kubeContext: ciCacheTestContext, pod: ciCacheTestPod}
+				if ok, why := f.d.ciCacheTrimVolume(context.Background(), tc.mode, at, *tc.row, 12*time.Hour); ok {
+					t.Fatalf("a row whose program cannot be built reached a verdict: %s", why)
+				}
+			} else {
+				if tc.exec != (cliReply{}) {
+					f.exec = tc.exec
+				}
+				f.tick()
+				f.drain()
+			}
+			if !tc.fails {
+				for _, v := range ciCacheVolumes {
+					if runs := ciCacheLedgerRuns(t, f, v.name); len(runs) != 0 {
+						t.Errorf("a dry run recorded %+v of %s, want nothing", runs, v.name)
+					}
+				}
+				return
+			}
+			runs := ciCacheLedgerRuns(t, f, ciCacheGocacheVolume)
+			if len(runs) != 1 || runs[0].Outcome != ciCacheTrimOutcomeFailed || len(runs[0].Stats) != 0 {
+				t.Errorf("runs of %s = %+v, want one failed run with no stats\n%s", ciCacheGocacheVolume, runs, f.logs.String())
+			}
+		})
+	}
+}
+
+// TestCICacheLedgerRefusedLedgerChangesNothing: a ledger that cannot be opened or
+// appended is logged once through ciCacheTrimLogf, and the pass's verdict and its
+// attention items are exactly what a healthy ledger leaves.
+func TestCICacheLedgerRefusedLedgerChangesNothing(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		ledger func() (jobRunAppender, error)
+		want   string
+	}{
+		{"the run cannot be appended", func() (jobRunAppender, error) { return failingJobLedger{}, nil }, "the run could not be recorded"},
+		{"the ledger cannot be opened", func() (jobRunAppender, error) { return nil, errors.New("jobledger: town root is empty") }, "the job ledger could not be opened"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+			// Half the log hold's window, so a second attempt lands inside it.
+			f.d.patrolConfig.Patrols.DiskMaintenance.CICacheTrimInterval = "30m"
+			// The npm volume reads over its cap having removed nothing, so its
+			// reading raises an item; a failed ledger write must leave it raised.
+			f.npmExec = ciCacheReply(2<<20, 0, 2<<20)
+			f.d.diskMaint.jobLedger = tc.ledger
+			f.tick()
+			f.drain()
+
+			want := ciCacheGocacheVolume + ": " + tc.want
+			if n := strings.Count(f.logs.String(), want); n != 1 {
+				t.Errorf("the refused ledger was logged %d time(s), want once\n%s", n, f.logs.String())
+			}
+			if items := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(items, []string{ciCacheNoOpKey + "-" + ciCacheNpmVolume}) {
+				t.Errorf("attention items = %v, want the npm reading's item", items)
+			}
+			if !strings.Contains(f.logs.String(), ciCacheGocacheVolume+": removed 3 ") {
+				t.Errorf("the refused ledger changed the verdict line:\n%s", f.logs.String())
+			}
+
+			// A second attempt inside the hour is held to the one line.
+			f.at(30 * time.Minute)
+			f.tick()
+			f.drain()
+			if n := strings.Count(f.logs.String(), want); n != 1 {
+				t.Errorf("across two attempts the refused ledger was logged %d time(s), want once\n%s", n, f.logs.String())
+			}
+		})
+	}
+}
