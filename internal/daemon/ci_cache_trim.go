@@ -108,8 +108,12 @@ const (
 	ciCacheNoOpKey = "ci-cache-trim-noop"
 
 	// ciCacheTrimOutcomeOK is the job ledger outcome of an apply run that reached
-	// a verdict. Runs that failed are not recorded by this change.
+	// a verdict.
 	ciCacheTrimOutcomeOK = "ok"
+
+	// ciCacheTrimOutcomeFailed is the job ledger outcome of an apply run whose
+	// program, exec or reply failed: it measured nothing, so it carries no stats.
+	ciCacheTrimOutcomeFailed = "failed"
 )
 
 // ciCacheVolume is one named volume the trim runs over. root is the one path the
@@ -857,20 +861,29 @@ func ciCacheTrimProgram(mode string, v ciCacheVolume, minutes int64) ([]string, 
 // ciCacheTrimVolume runs the trim over one volume and reports whether it reached a
 // verdict; when it did not, reason is the first line of the failure or refusal the
 // trim logs for that volume, which the volume's item carries (gt-u8n4tx). A volume
-// whose exec or reply failed is a failed run that names the volume and removes
-// nothing.
+// whose program, exec or reply failed is a failed run that names the volume, records
+// no stats and removes nothing.
 func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheExecTarget, v ciCacheVolume, maxAge time.Duration) (verdict bool, reason string) {
 	minutes := int64(maxAge / time.Minute)
+	started := d.diskMaintenanceSeams().now()
+	// A failure is a run that measured nothing: an apply records it as failed with
+	// no stats, and a dry run records nothing at all, since it removes nothing.
+	failed := func(ended time.Time) {
+		if mode == agentconfig.DiskMaintenanceModeApply {
+			d.recordCICacheTrimFailedRun(v, started, ended)
+		}
+	}
 	program, err := ciCacheTrimProgram(mode, v, minutes)
 	if err != nil {
 		d.ciCacheTrimLogf("program refused "+v.name, "disk_maintenance: ci cache trim: %s: the volume's program could not be built: %v; nothing trimmed", v.name, err)
+		failed(d.diskMaintenanceSeams().now())
 		return false, fmt.Sprintf("the volume's program could not be built: %v", err)
 	}
 	args := append([]string{"exec", "-n", at.runner.namespace, at.pod, "-c", at.runner.container, "--", "sh"}, program...)
-	started := d.diskMaintenanceSeams().now()
 	stdout, stderr, err := d.ciCacheTrimKubectlRun(ctx, at.kubeconfig, at.kubeContext, args...)
 	ended := d.diskMaintenanceSeams().now()
 	if err != nil {
+		failed(ended)
 		var status interface{ ExitCode() int }
 		if errors.As(err, &status) && status.ExitCode() == ciCacheMissingPathExit {
 			d.ciCacheTrimLogf("volume path missing "+v.name, "disk_maintenance: ci cache trim: %s: the volume path %s is not in the %s container; nothing trimmed", v.name, v.root, ciCacheContainer)
@@ -896,6 +909,7 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 	}
 	if err != nil {
 		d.ciCacheTrimLogf("reply unreadable "+v.name, "disk_maintenance: ci cache trim: %s: the volume's reply could not be read: %v; nothing trimmed", v.name, err)
+		failed(d.diskMaintenanceSeams().now())
 		return false, fmt.Sprintf("the volume's reply could not be read: %v", err)
 	}
 
@@ -950,6 +964,20 @@ func (d *Daemon) recordCICacheTrimRun(v ciCacheVolume, started, ended time.Time,
 		stats["cap_bytes"] = v.capKiB * 1024
 	}
 	run := jobledger.Run{Job: ciCacheTrimName + ":" + v.name, StartedAt: started, EndedAt: ended, Outcome: ciCacheTrimOutcomeOK, Stats: stats}
+	d.appendCICacheTrimRun(v, run)
+}
+
+// recordCICacheTrimFailedRun appends one failed apply run of v to the job ledger
+// with no stats: a program, exec or reply that failed measured nothing.
+func (d *Daemon) recordCICacheTrimFailedRun(v ciCacheVolume, started, ended time.Time) {
+	run := jobledger.Run{Job: ciCacheTrimName + ":" + v.name, StartedAt: started, EndedAt: ended, Outcome: ciCacheTrimOutcomeFailed}
+	d.appendCICacheTrimRun(v, run)
+}
+
+// appendCICacheTrimRun writes one run to the town's job ledger. A ledger that
+// cannot be opened or appended is logged once through ciCacheTrimLogf and changes
+// nothing else: the ledger records what the trim did, it is not part of doing it.
+func (d *Daemon) appendCICacheTrimRun(v ciCacheVolume, run jobledger.Run) {
 	ledger, err := d.diskMaintenanceSeams().jobLedger()
 	if err != nil {
 		d.ciCacheTrimLogf("job ledger "+v.name, "disk_maintenance: ci cache trim: %s: the job ledger could not be opened (%v); the run is not recorded", v.name, err)
