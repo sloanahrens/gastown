@@ -2526,6 +2526,38 @@ func TestTierSweepRunnerSpecTakesTheRunnerBlockFromConfigSpec(t *testing.T) {
 	}
 }
 
+// TestTierSweepGoCacheProgSpec: a Spec the daemon builds from the runner block
+// carries go_cache_prog_max_bytes, so the run's Go builds go through the cache
+// program; with the setting omitted the field is 0 and the builds run as before
+// (gt-v6i7s6).
+func TestTierSweepGoCacheProgSpec(t *testing.T) {
+	t.Parallel()
+	d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	cfg := runnerTestConfig(t)
+	cfg.Backend = config.TierSweepRunnerKubernetes
+	d.patrolConfig.Patrols.TierSweep.Runner = cfg
+	stage := tierSweepStage{tiers: []string{"integration"}, slot: true, rig: "gastown", tested: runnerTestSHA}
+
+	for _, tc := range []struct {
+		name    string
+		setting int
+	}{
+		{name: "with the setting", setting: 1073741824},
+		{name: "without the setting"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg.GoCacheProgMaxBytes = tc.setting
+			spec, ok, err := d.tierSweepRunnerSpec(stage)
+			if err != nil || !ok {
+				t.Fatalf("spec = %+v, ok = %v, err = %v", spec, ok, err)
+			}
+			if spec.GoCacheProgMaxBytes != tc.setting {
+				t.Errorf("GoCacheProgMaxBytes = %d, want %d from the runner block", spec.GoCacheProgMaxBytes, tc.setting)
+			}
+		})
+	}
+}
+
 // TestTierSweepRunnerSpecInCluster: a daemon that decides it runs in a pod sets
 // Spec.InCluster on every Spec it builds, asks the decision for the runner's
 // context, and logs it once, not per Spec; a daemon that decides otherwise leaves

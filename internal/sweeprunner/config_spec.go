@@ -23,6 +23,7 @@ func ConfigSpec(cfg *config.TierSweepRunnerConfig) Spec {
 		RunnerCPURequest:       cfg.RunnerCPURequest,
 		RunnerCPURequestMillis: cfg.RunnerCPURequestMillis,
 		DindCPURequestMillis:   cfg.DindCPURequestMillis,
+		GoCacheProgMaxBytes:    cfg.GoCacheProgMaxBytes,
 		Context:                cfg.Context,
 		Namespace:              cfg.NamespaceName(),
 		ProtectedNamespaces:    cfg.ProtectedNamespaceList(),
