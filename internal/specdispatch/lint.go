@@ -906,6 +906,10 @@ func lintShape(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
 	if r, blocked := nestedAcceptanceBoxRefusal(acceptanceText(s, sections)); blocked {
 		failures = append(failures, r)
 	}
+	// A box asking for recorded evidence of a run is refused here (gt-7qtrif).
+	if r, blocked := evidenceBoxRefusal(acceptanceText(s, sections)); blocked {
+		failures = append(failures, r)
+	}
 	// An acceptance item claiming a zero result on a fixture path proves
 	// nothing at landing unless the bead shows the command and its output:
 	// it is refused here, beside the other acceptance checks (gt-1adj4k).
