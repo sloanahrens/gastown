@@ -114,3 +114,38 @@ func TestCacheNeedRejectsBadFlags(t *testing.T) {
 		})
 	}
 }
+
+// cacheNeedFailWriter fails every Write, to drive the output error branches.
+type cacheNeedFailWriter struct{}
+
+func (cacheNeedFailWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
+
+func TestCacheNeedOutputError(t *testing.T) {
+	t.Parallel()
+	deps := cacheNeedTestDeps(nil, nil, time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC))
+	for _, args := range [][]string{nil, {"--json"}} {
+		c := newCacheCmd(deps)
+		c.SetOut(cacheNeedFailWriter{})
+		c.SetErr(io.Discard)
+		c.SetArgs(append([]string{"need"}, args...))
+		if err := c.Execute(); err == nil || !strings.Contains(err.Error(), "disk full") {
+			t.Errorf("%v: err = %v, want the write error", args, err)
+		}
+	}
+}
+
+func TestCacheNeedFindTownError(t *testing.T) {
+	t.Parallel()
+	deps := cacheNeedTestDeps(nil, nil, time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC))
+	deps.findTown = func() (string, error) { return "", errors.New("no town") }
+	if _, err := runCacheNeedCommand(t, deps); err == nil || !strings.Contains(err.Error(), "find the town root") {
+		t.Errorf("err = %v, want one naming the town root", err)
+	}
+}
+
+func TestCacheNeedRealDepsLedgerError(t *testing.T) {
+	t.Parallel()
+	if _, err := cacheNeedRealDeps().tail("", "sweep_cache_trim", 1); err == nil {
+		t.Error("an empty town root read a ledger, want the NewLedger error")
+	}
+}
