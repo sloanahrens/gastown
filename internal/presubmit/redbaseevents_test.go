@@ -48,16 +48,16 @@ func TestRedBaseRan(t *testing.T) {
 		want RedBaseEvents
 	}{
 		{"a pass, a fail and a skip each name a top-level test", `{"Action":"pass","Test":"TestA"}` + "\n" + `{"Action":"fail","Test":"TestC"}` + "\n" + `{"Action":"skip","Test":"TestB"}`,
-			RedBaseEvents{Passed: []string{"TestA"}, Ran: []string{"TestA", "TestB", "TestC"}}},
+			RedBaseEvents{Passed: []string{"TestA"}, Failed: []string{"TestC"}, Ran: []string{"TestA", "TestB", "TestC"}}},
 		{"a subtest event names no top-level test", `{"Action":"pass","Test":"TestA/sub"}`, RedBaseEvents{}},
-		{"a test-level fail is not the package result", `{"Action":"fail","Test":"TestA"}`, RedBaseEvents{Ran: []string{"TestA"}}},
+		{"a test-level fail is not the package result", `{"Action":"fail","Test":"TestA"}`, RedBaseEvents{Failed: []string{"TestA"}, Ran: []string{"TestA"}}},
 		{"a package-level fail is the package result", `{"Action":"fail","Package":"p"}`, RedBaseEvents{FailedBuild: true}},
 		{"a package-level pass is not a fail", `{"Action":"pass","Package":"p"}`, RedBaseEvents{}},
 		{"a package-level skip is not a fail", `{"Action":"skip","Package":"p"}`, RedBaseEvents{}},
 		{"a non-JSON line names nothing", "# example.com/p\n./x.go:3:2: undefined: y", RedBaseEvents{}},
 		{"empty output names nothing", "", RedBaseEvents{}},
 		{"a test named twice is named once, sorted", `{"Action":"fail","Test":"TestB"}` + "\n" + `{"Action":"pass","Test":"TestA"}` + "\n" + `{"Action":"fail","Test":"TestB"}`,
-			RedBaseEvents{Passed: []string{"TestA"}, Ran: []string{"TestA", "TestB"}}},
+			RedBaseEvents{Passed: []string{"TestA"}, Failed: []string{"TestB"}, Ran: []string{"TestA", "TestB"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
