@@ -301,6 +301,11 @@ const (
 	// several runs in a row: the verdict is unknown, and no red-main bead can
 	// say so (gt-glc2yh).
 	RuleMainUnknown = "main.unknown"
+
+	// RuleFormulasStale is a town formula that differs from the copy the
+	// running binary embeds: the binary runs one workflow and the town's
+	// readers see another until the two are reconciled (gt-glqv7r).
+	RuleFormulasStale = "formulas.stale"
 )
 
 var (
@@ -555,6 +560,10 @@ var ruleFlags = map[string]RuleFlags{
 	// main.red's class, and the overseer is woken to find what the check could
 	// not read (gt-glc2yh).
 	RuleMainUnknown: flagsWake,
+	// A town formula that differs from the binary's copy means the workflow
+	// the binary runs is not the one the town's readers see: no run rewrites
+	// the file itself, so the overseer is woken to reconcile them (gt-glqv7r).
+	RuleFormulasStale: flagsWake,
 }
 
 // DiskWarnPromoteBeats is how many consecutive heartbeats host.disk_warn must
@@ -667,6 +676,7 @@ var kindRules = map[Kind]string{
 	KindBDGatewayCapHit:               RuleBDGatewayCapHit,
 	KindBDGatewayUnreachable:          RuleBDGatewayUnreachable,
 	KindMainUnknown:                   RuleMainUnknown,
+	KindFormulasStale:                 RuleFormulasStale,
 }
 
 // jobOverdueWakePrefix is the key a job that missed two cadences raises under

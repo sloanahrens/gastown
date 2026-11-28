@@ -276,6 +276,10 @@ const (
 	// KindMainUnknown: the rig's red-main check could not judge main for
 	// several runs in a row, so whether main is red is unknown (gt-glc2yh).
 	KindMainUnknown Kind = "main-unknown"
+	// KindFormulasStale: a town formula differs from the one the running
+	// binary embeds, so the binary runs a workflow older or newer than the
+	// town's copy and the overseer reconciles the two (gt-glqv7r).
+	KindFormulasStale Kind = "formulas-stale"
 	// KindSeatEndNoRecord: a seat's end found neither its SEAT-END comment nor
 	// a transcript copy, so the work it did has no usage record, and the marker
 	// it left stands until a SEAT-END comment naming the seat appears
@@ -309,6 +313,7 @@ func Kinds() []Kind {
 		KindBDGatewayUnreachable,
 		KindBdGatewayRefusals,
 		KindMainUnknown,
+		KindFormulasStale,
 		KindRedHoldHeld,
 		KindSeatEndNoRecord,
 	}
