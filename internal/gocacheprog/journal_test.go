@@ -310,3 +310,96 @@ func TestJournalWriteAfterCloseIsError(t *testing.T) {
 		t.Error("write after Close: want error")
 	}
 }
+
+// journalDirNames lists the names in dir, fails the test if it cannot.
+func journalDirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	must(t, err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+func TestJournalOpenLeavesOneLiveLogFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	j, err := OpenJournal(dir, func() time.Time { return journalT0 })
+	must(t, err)
+	t.Cleanup(func() { must(t, j.Close()) })
+	jdir := filepath.Join(dir, "journal")
+	names := journalDirNames(t, jdir)
+	if len(names) != 1 || !strings.HasSuffix(names[0], ".log") {
+		t.Fatalf("journal dir = %v, want exactly one .log file", names)
+	}
+	if want := filepath.Join(jdir, names[0]); j.Path() != want {
+		t.Errorf("Path = %s, want the .log file %s", j.Path(), want)
+	}
+	got, err := ReadJournal(j.Path())
+	must(t, err)
+	if !got.Live {
+		t.Error("opened journal: Live = false, want true")
+	}
+}
+
+func TestJournalOpenDirIsFileIsError(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	must(t, os.WriteFile(file, []byte("x"), 0o644))
+	if _, err := OpenJournal(file, func() time.Time { return journalT0 }); err == nil {
+		t.Fatal("OpenJournal with a regular file as dir: want error")
+	}
+}
+
+func TestJournalFailedStartLeavesNoFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "j.log")
+	year10000 := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, err := openJournalNamed(path, func() time.Time { return year10000 })
+	if err == nil {
+		t.Fatal("openJournalNamed with an unencodable start time: want error")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name %s", err, path)
+	}
+	if names := journalDirNames(t, dir); len(names) != 0 {
+		t.Errorf("dir after failed start = %v, want no files", names)
+	}
+}
+
+func TestJournalFailedRenameLeavesNoTmp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "j.log")
+	// A directory at the final name makes the rename of the file onto it fail.
+	must(t, os.Mkdir(path, 0o755))
+	_, err := openJournalNamed(path, func() time.Time { return journalT0 })
+	if err == nil {
+		t.Fatal("openJournalNamed with a directory at its path: want error")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name %s", err, path)
+	}
+	if names := journalDirNames(t, dir); len(names) != 1 || names[0] != "j.log" {
+		t.Errorf("dir after failed rename = %v, want only the directory the test made", names)
+	}
+}
+
+func TestJournalExistingTmpIsRefused(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "j.log")
+	tmp := path + ".tmp"
+	must(t, os.WriteFile(tmp, []byte("someone else's"), 0o644))
+	if _, err := openJournalNamed(path, func() time.Time { return journalT0 }); err == nil {
+		t.Fatal("openJournalNamed with a .tmp already present: want error")
+	}
+	data, err := os.ReadFile(tmp)
+	must(t, err)
+	if string(data) != "someone else's" {
+		t.Errorf(".tmp = %q, want it left as found", data)
+	}
+}

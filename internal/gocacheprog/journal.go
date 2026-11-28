@@ -1,10 +1,13 @@
 package gocacheprog
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +70,49 @@ func openJournalAt(path string, now func() time.Time) (*Journal, error) {
 		return nil, errors.Join(fmt.Errorf("gocacheprog: journal %s: %w", path, err), j.Close())
 	}
 	return j, nil
+}
+
+// OpenJournal opens a new journal in dir/journal under a random name. The
+// journal appears there only once it is locked and its start line is written.
+func OpenJournal(dir string, now func() time.Time) (*Journal, error) {
+	jdir := filepath.Join(dir, "journal")
+	if err := os.MkdirAll(jdir, 0o755); err != nil {
+		return nil, fmt.Errorf("gocacheprog: journal dir %s: %w", jdir, err)
+	}
+	var name [8]byte
+	if _, err := rand.Read(name[:]); err != nil {
+		return nil, fmt.Errorf("gocacheprog: journal name: %w", err)
+	}
+	return openJournalNamed(filepath.Join(jdir, hex.EncodeToString(name[:])+".log"), now)
+}
+
+// openJournalNamed opens the journal at path through path+".tmp": the file is
+// locked and its start line written under the .tmp name, then renamed to path.
+// A failure removes the .tmp file and releases the lock. A .tmp that already
+// exists is refused and left alone, since this call did not make it.
+func openJournalNamed(path string, now func() time.Time) (*Journal, error) {
+	tmp := path + ".tmp"
+	if _, err := os.Lstat(tmp); err == nil {
+		return nil, fmt.Errorf("gocacheprog: journal %s: %s already exists", path, tmp)
+	}
+	j, err := openJournalAt(tmp, now)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("gocacheprog: journal %s: %w", path, err), removeTmp(tmp))
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return nil, errors.Join(fmt.Errorf("gocacheprog: journal %s: rename: %w", path, err), j.Close(), removeTmp(tmp))
+	}
+	j.path = path
+	return j, nil
+}
+
+// removeTmp deletes the .tmp file a failed open left behind. A file that was
+// never created is not an error.
+func removeTmp(tmp string) error {
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // Path returns the file this journal writes.
