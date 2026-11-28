@@ -146,6 +146,9 @@ const (
 	// tierSweepStatDurationMS is the ledger stat holding a cycle's duration.
 	tierSweepStatDurationMS = "duration_ms"
 
+	// tierSweepCacheTrimLedgerJob is the job name a run's cache trim figures carry (gt-oh2ywo).
+	tierSweepCacheTrimLedgerJob = "sweep_cache_trim"
+
 	// tierSweepRetryMinGap is the least time between a red cycle and the early
 	// re-run its closed fix beads allow, so a sweep that stays red on every new
 	// landing cannot loop faster than this.
@@ -1409,6 +1412,29 @@ func (d *Daemon) recordTierSweepJobRun(started, ended time.Time) {
 	}
 	if err := d.appendJobRun(entry); err != nil {
 		d.logger.Printf("tier_sweep: the job run was not recorded: %v", err)
+	}
+}
+
+// recordTierSweepCacheTrimRun appends one finished run's cache trim figures to
+// the town's job ledger, dated from the line's elapsed_ms. A run that left no
+// line (an earlier image) records nothing, an unreadable one logs its error, and
+// a refused append logs one line; none changes the sweep's verdict or line (gt-oh2ywo).
+func (d *Daemon) recordTierSweepCacheTrimRun(rig, outDir string) {
+	stats, ok, err := sweeprunner.ReadCacheTrimStats(filepath.Join(outDir, sweeprunner.LogsDirName))
+	if err != nil {
+		d.logger.Printf("tier_sweep: %s: the run's cache trim figures were not recorded: %v", rig, err)
+	} else if ok {
+		ended := d.clk().Now()
+		entry := jobledger.Run{
+			Job:       tierSweepCacheTrimLedgerJob,
+			StartedAt: ended.Add(-time.Duration(stats["elapsed_ms"]) * time.Millisecond),
+			EndedAt:   ended,
+			Outcome:   tierSweepOutcomeOK,
+			Stats:     stats,
+		}
+		if err := d.appendJobRun(entry); err != nil {
+			d.logger.Printf("tier_sweep: %s: the run's cache trim figures were not recorded: %v", rig, err)
+		}
 	}
 }
 
@@ -3382,6 +3408,7 @@ func (d *Daemon) tierSweepRunnerStageResult(st tierSweepStage, spec sweeprunner.
 		exitCode = tierSweepRedExit
 	}
 	d.tierSweepCacheAttention(spec.Rig, spec.OutDir)
+	d.recordTierSweepCacheTrimRun(spec.Rig, spec.OutDir)
 	return tierSweepStageResult{output: tierSweepRunnerOutput(&b, res), exitCode: exitCode, ran: true,
 		timingNote: tierSweepRunnerTimingNote(stageStart, res.Started, res.Finished, d.clk().Now()),
 		cacheNote:  tierSweepCacheNote(spec.OutDir)}
