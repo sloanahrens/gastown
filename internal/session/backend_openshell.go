@@ -998,7 +998,7 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 
 	workDir := path.Join(sandboxTownRoot, rel)
 	if err := b.populate(ctx, spec, workDir, redirectTarget(rel), workspaceID, staged); err != nil {
-		return nil, b.rollback(spec, err, spec.Trace)
+		return nil, b.rollback(spec, err, spec.Trace, nil)
 	}
 
 	b.tmux = tmux.NewTmuxWithExecPrefix(SandboxTmuxSocket, SandboxExecPrefix(b.profile.Gateway, spec.Session)).Routed()
@@ -1303,8 +1303,12 @@ func (b *openshellBackend) checkSandboxGT(ctx context.Context, name string) erro
 // seat's tracker token ends with it; the seat comes from the spec, because the
 // record is the last thing populate writes and a failed populate often has not
 // written one. The cleanup runs on its own context, so a canceled spawn still
-// cleans up (gt-p85pw.86).
-func (b *openshellBackend) rollback(spec SpawnSpec, cause error, trace *SandboxTrace) error {
+// cleans up (gt-p85pw.86). The claim goes with the sandbox when the delete
+// succeeded; when the delete failed the sandbox may still be there, so the claim
+// file that names it is only unlocked. A nil claim is one this spawn holds no
+// lock on. The claim is released after the seat's token is revoked, so no other
+// writer takes the name while the token is live (gt-5j8bcy).
+func (b *openshellBackend) rollback(spec SpawnSpec, cause error, trace *SandboxTrace, claim *sandboxClaim) error {
 	var deleteErr error
 	err := trace.Phase("teardown", func() error {
 		// A sandbox that a failed populate never finished creating is already
@@ -1324,8 +1328,16 @@ func (b *openshellBackend) rollback(spec SpawnSpec, cause error, trace *SandboxT
 	if deleteErr == nil {
 		b.revokeSeat(SandboxRecord{Session: spec.Session, Rig: spec.Rig, Polecat: spec.Polecat})
 	}
-	if err != nil {
-		return fmt.Errorf("%w (rolling back sandbox %s: %v)", cause, spec.Session, err)
+	var claimErr error
+	if claim != nil {
+		if deleteErr == nil {
+			claimErr = claim.Remove()
+		} else {
+			claimErr = claim.Unlock()
+		}
+	}
+	if rollbackErr := errors.Join(err, claimErr); rollbackErr != nil {
+		return fmt.Errorf("%w (rolling back sandbox %s: %v)", cause, spec.Session, rollbackErr)
 	}
 	return cause
 }
