@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/lock"
@@ -17,6 +18,17 @@ const (
 	opPut   = "put"
 	opUse   = "use"
 )
+
+// Journal is one process's record of the entries it stored and used. Its file
+// stays locked until Close, so a reader that finds the lock held knows the
+// process may still use the entries the journal names.
+type Journal struct {
+	mu     sync.Mutex
+	path   string
+	f      *os.File
+	unlock func()
+	closed bool
+}
 
 // Record is one journal line: the start line, a put of an entry's body or a use of an entry.
 type Record struct {
@@ -33,6 +45,62 @@ type JournalContents struct {
 	Live        bool // a process held the journal's lock when ReadJournal probed it
 	Records     []Record
 	Undecodable int // lines after the start line that are not a well-formed put or use
+}
+
+// openJournalAt creates the journal file at path, locks it and writes its
+// start line stamped with now. A failure after the file is created releases
+// the lock and closes the file.
+func openJournalAt(path string, now func() time.Time) (*Journal, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("gocacheprog: journal %s: open: %w", path, err)
+	}
+	unlock, ok, err := lock.FlockTryAcquire(path)
+	if err == nil && !ok {
+		err = lock.ErrFlockHeld
+	}
+	j := &Journal{path: path, f: f, unlock: unlock}
+	if err == nil {
+		err = j.write(Record{Op: opStart, Time: now()})
+	}
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("gocacheprog: journal %s: %w", path, err), j.Close())
+	}
+	return j, nil
+}
+
+// Path returns the file this journal writes.
+func (j *Journal) Path() string { return j.path }
+
+// Close releases the lock and closes the file. A second Close returns nil.
+func (j *Journal) Close() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return nil
+	}
+	j.closed = true
+	err := j.f.Close()
+	if j.unlock != nil {
+		j.unlock()
+	}
+	if err != nil {
+		return fmt.Errorf("gocacheprog: journal %s: close: %w", j.path, err)
+	}
+	return nil
+}
+
+// write appends r as one JSON line in a single Write call. After Close the
+// write fails, because the file is closed.
+func (j *Journal) write(r Record) error {
+	line, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Errorf("gocacheprog: journal %s: encode: %w", j.path, err)
+	}
+	if _, err := j.f.Write(append(line, '\n')); err != nil {
+		return fmt.Errorf("gocacheprog: journal %s: write: %w", j.path, err)
+	}
+	return nil
 }
 
 // ReadJournal reads the journal at path. The first line must be a start line.
