@@ -78,7 +78,7 @@ const sweepNoExit = -1
 // else the rig's tier script.
 const (
 	// goSweepDir is the directory whose presence means the tree ships the Go
-	// sweep this run starts in process.
+	// sweep this run builds from the tree and starts as a child process.
 	goSweepDir = "cmd/tier-sweep"
 	// scriptPath is the rig's own tier script, relative to the tree: the host
 	// sweep's tierSweepScriptPath.
@@ -277,7 +277,7 @@ func sweepTiers(opts options, work string, d Deps, stdout, stderr io.Writer) (ti
 		// the host sweep runs it, and reads the run's log directory from the
 		// environment. It gets none of the Go sweep's timings or resume file: the
 		// host sweep passes a script stage none either (tierSweepStageEnv). It
-		// does get the no-slot setting the in-process sweep gets: the container
+		// does get the no-slot setting the Go sweep gets: the container
 		// holds no town for the script's own gt slot run calls to find, and the
 		// runner holds its own reservation. The trigger is off for the same
 		// reason: its state lives in a town the container does not have.
@@ -339,8 +339,8 @@ func recordProgress(dir string, p *Progress, stderr io.Writer) {
 type sweepChoice int
 
 const (
-	// sweepInProcess runs internal/tiersweep in this process: the tree ships
-	// the Go command.
+	// sweepInProcess runs the Go command the tree ships: built from the tree and
+	// started as a child process (treeSweep).
 	sweepInProcess sweepChoice = iota
 	// sweepScript runs the rig's own tier script with the tiers as arguments.
 	sweepScript
@@ -922,7 +922,7 @@ func treeHas(work, rel string) (bool, error) {
 
 // runScript runs the rig's tier script: the program and arguments are the host
 // sweep's stage command (tierSweepStage.command), with the environment the run
-// built and its output streaming into the writers the in-process sweep gets.
+// built and its output streaming into the writers the Go sweep gets.
 func runScript(program string, args []string, dir string, env []string, stdout, stderr io.Writer) int {
 	cmd := exec.Command(program, args...) //nolint:gosec // G204: the program is the constant bash, and the arguments are the tree's own script path and the run's tiers
 	cmd.Dir = dir
@@ -939,41 +939,6 @@ func runScript(program string, args []string, dir string, env []string, stdout, 
 	}
 	// The script could not be started at all: no status, so no verdict.
 	return sweepNoExit
-}
-
-// processSweep runs the sweep in this process with its real seams: git, go and
-// gt as child processes, and the real clock and filesystem. The overrides reach
-// the sweep's own option reads through the host and its children through the
-// environment, without mutating the process's environment.
-func processSweep(args []string, overrides map[string]string, stdout, stderr io.Writer) int {
-	return sweepWith(tiersweep.Run, args, overrides, os.Getenv, os.Environ(), os.ReadFile, time.Now, stdout, stderr)
-}
-
-// sweepRunner runs one sweep: tiersweep.Run in the container, and a fake in a
-// test that holds what the sweep was handed.
-type sweepRunner func(args []string, stdout, stderr io.Writer, d tiersweep.Deps) int
-
-// sweepWith is processSweep over the runner and the process reads it is given,
-// so the wiring is a value a test can hold: the overrides answer the sweep's own
-// option reads before the process environment does, and reach each child through
-// the environment it is started with.
-func sweepWith(run sweepRunner, args []string, overrides map[string]string,
-	getenv func(string) string, environ []string, readFile func(string) ([]byte, error), now func() time.Time,
-	stdout, stderr io.Writer) int {
-	host := tiersweep.ProcessHost
-	host.Env = func(key string) string {
-		if value, ok := overrides[key]; ok {
-			return value
-		}
-		return getenv(key)
-	}
-	return run(args, stdout, stderr, tiersweep.Deps{
-		Host:     host,
-		Exec:     tiersweep.ProcessExec,
-		ReadFile: readFile,
-		Environ:  environWith(environ, overrides),
-		Now:      now,
-	})
 }
 
 // environWith returns base with the overrides appended, in a fixed order, so the
