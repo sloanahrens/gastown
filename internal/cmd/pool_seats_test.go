@@ -1596,6 +1596,48 @@ func TestPoolDeadHookedSeatCarriesItsDispositionClass(t *testing.T) {
 	}
 }
 
+// TestPoolDeadHookedSeatCarriesWhetherItRunsNothing pins the runsNothing mark
+// the walk gives a counted dead-hooked seat (gt-p1og4z): a measured seat with
+// nothing held and an idle agent bead carries it, while held work, a working
+// agent bead, a failed read and an unmeasured seat do not. A seat the walk does
+// not count carries no mark at all.
+func TestPoolDeadHookedSeatCarriesWhetherItRunsNothing(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1760000000, 0)
+	cases := []struct {
+		name    string
+		state   poolSeatState
+		err     error
+		counted bool
+		want    bool
+	}{
+		{"a measured unheld idle seat runs nothing", deadSeatRead(false), nil, true, true},
+		{"a seat with held work runs something", poolSeatState{DeadDisposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, DeadRead: true, HookHeld: true}, nil, true, false},
+		{"a working agent bead runs something", poolSeatState{DeadDisposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, DeadRead: true, AgentWorking: true}, nil, true, false},
+		{"a seat whose read failed is not proven to run nothing", deadSeatRead(false), errors.New("beads down"), true, false},
+		{"an unmeasured seat is not proven to run nothing", poolSeatState{}, nil, true, false},
+		{"a measured free seat carries no mark", deadSeatRead(true), nil, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town, pool := deadHookedWalkTestTown(t, "ember")
+			disposition := func(string, string) (poolSeatState, error) { return c.state, c.err }
+
+			got, _, _ := poolDeadHookedSessions(town, pool, disposition, nil, now)
+			if c.counted {
+				if len(got) != 1 || got[0].runsNothing != c.want {
+					t.Fatalf("dead-hooked seats = %+v, want one seat with runsNothing %v", got, c.want)
+				}
+				return
+			}
+			if len(got) != 0 {
+				t.Fatalf("dead-hooked seats = %+v, want none", got)
+			}
+		})
+	}
+}
+
 // TestPoolDeadHookedSeatWhoseReadFailedIsClassUnread pins that a seat whose
 // state read failed, or whose state was never measured, is counted with the
 // class unread. A failed read is returned beside the seat, so the count stays
