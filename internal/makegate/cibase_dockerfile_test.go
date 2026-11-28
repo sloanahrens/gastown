@@ -1,3 +1,5 @@
+//go:build !integration
+
 package makegate
 
 import (
@@ -251,7 +253,7 @@ func readCIBaseDockerfile(t *testing.T) string {
 func mutate(t *testing.T, text, old, new string) string {
 	t.Helper()
 	if n := strings.Count(text, old); n != 1 {
-		t.Fatalf("%q occurs %d times in the shipped Dockerfile, want once", old, n)
+		t.Fatalf("%q occurs %d times in the shipped file, want once", old, n)
 	}
 	return strings.Replace(text, old, new, 1)
 }
@@ -350,7 +352,7 @@ func TestCIBaseDockerfileJQDigest(t *testing.T) {
 		{name: "sha256sum checks JQ_VERSION, not JQ_SHA256", old: "\"${JQ_SHA256}  /usr/local/bin/jq\"", new: "\"${JQ_VERSION}  /usr/local/bin/jq\"", wantErr: true},
 		{name: "sha256sum checks a literal digest", old: "\"${JQ_SHA256}  /usr/local/bin/jq\"", new: "\"" + strings.Repeat("0", 64) + "  /usr/local/bin/jq\"", wantErr: true},
 		{name: "chmod removed", old: " && chmod 0755 /usr/local/bin/jq \\\n", wantErr: true},
-		{name: "chmod leaves jq non-executable", old: "chmod 0755", new: "chmod 0644", wantErr: true},
+		{name: "chmod leaves jq non-executable", old: "chmod 0755 /usr/local/bin/jq", new: "chmod 0644 /usr/local/bin/jq", wantErr: true},
 		{name: "version test removed", old: " \\\n && test \"$(jq --version)\" = \"jq-${JQ_VERSION}\"", wantErr: true},
 		{name: "download dropped", text: jqLayerDockerfile(jqDigestStep + " && " + jqChmodStep + " && " + jqVersionStep), wantErr: true},
 		{name: "chmod runs before the digest check", text: jqLayerDockerfile(jqDownloadStep + " && " + jqChmodStep + " && " + jqDigestStep + " && " + jqVersionStep), wantErr: true},
@@ -432,5 +434,100 @@ func TestCIBaseDockerfileCleansGoCaches(t *testing.T) {
 				t.Fatalf("checkCIBaseGoCaches refused the Dockerfile: %v", err)
 			}
 		})
+	}
+}
+
+// cacheProgramDir is the program's store: a named volume first mounted at a
+// path the image lacks is created root-owned (gt-9ui7q). cacheImageCompile
+// stages the binary for the runner's Linux arm64 host, and cacheImageRemove
+// takes it out after the image build, keeping the build's exit status.
+const (
+	cacheProgramPath   = "/usr/local/bin/gt-gocacheprog"
+	cacheProgramDir    = "/home/ci/.cache/gt-gocacheprog"
+	cacheProgramStaged = "bin/gt-gocacheprog"
+	cacheImageCompile  = `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "$(CI_BASE_CONTEXT)/bin/gt-gocacheprog" ./cmd/gt-gocacheprog || { rm -rf "$(CI_BASE_CONTEXT)/bin"; exit 1; }`
+	cacheImageRemove   = `rc=$$?; rm -rf "$(CI_BASE_CONTEXT)/bin"; exit $$rc`
+)
+
+// checkCIBaseCacheProgram reports why the ci-base build does not carry the Go
+// cache program (gt-yiohwp): the Dockerfile copies and checks the binary and
+// creates its store for BASE_USER; the recipe refuses an empty CI_BASE_IMAGE
+// first, then compiles, builds and removes; .gitignore names the staging dir.
+func checkCIBaseCacheProgram(dockerfile, recipe, gitignore string) error {
+	layer, copied, runs := "", false, 0
+	for _, in := range parseDockerfile(dockerfile) {
+		if in.keyword == "COPY" && in.args == cacheProgramStaged+" "+cacheProgramPath {
+			copied = true
+		}
+		if (in.keyword == "ENV" || in.keyword == "ARG") && strings.Contains(in.args, "GOCACHEPROG") {
+			return errors.New("an ENV or ARG sets GOCACHEPROG")
+		}
+		if in.keyword == "RUN" && strings.Contains(in.args, cacheProgramPath) {
+			layer, runs = strings.Join(strings.Fields(in.args), " "), runs+1
+		}
+	}
+	for _, want := range []string{"chmod 0755 " + cacheProgramPath, "test -x " + cacheProgramPath, `install -d -o "${BASE_USER}" ` + cacheProgramDir} {
+		if !copied || runs != 1 || !strings.Contains(layer, want) {
+			return fmt.Errorf("the Dockerfile does not hold one COPY and one RUN with %q", want)
+		}
+	}
+	flat := strings.Join(strings.Fields(recipe), " ")
+	if !strings.HasPrefix(flat, `test -n "$(CI_BASE_IMAGE)"`) || !strings.Contains(strings.Split(recipe, "\n")[0], "exit 2") {
+		return errors.New("the recipe does not refuse an empty CI_BASE_IMAGE first")
+	}
+	compile, image := strings.Index(flat, cacheImageCompile), strings.Index(flat, "docker build")
+	switch {
+	case compile < 0:
+		return errors.New("the recipe does not run the cache program compile")
+	case image < 0 || image < compile:
+		return errors.New("the image build is missing or runs before the compile")
+	case !strings.Contains(flat[image:], "; "+cacheImageRemove):
+		return errors.New("the staged binary is not removed on every path out")
+	case !strings.Contains(gitignore, "/deploy/ci-base/bin/"):
+		return errors.New("the .gitignore does not name /deploy/ci-base/bin/")
+	}
+	return nil
+}
+
+// TestCIBaseImageCarriesTheCacheProgram checks the program's image layer and
+// the recipe that stages it (gt-yiohwp). Each row breaks one requirement, and
+// the check must refuse it.
+func TestCIBaseImageCarriesTheCacheProgram(t *testing.T) {
+	t.Parallel()
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join("..", "..", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return string(b)
+	}
+	dockerfile, gitignore := read("deploy/ci-base/Dockerfile"), read(".gitignore")
+	recipe := strings.Join(strings.Fields(strings.Join(recipeLines(read("Makefile"), "ci-base-image"), "\n")), " ")
+	if err := checkCIBaseCacheProgram(dockerfile, recipe, gitignore); err != nil {
+		t.Fatalf("the shipped files do not carry the cache program: %v", err)
+	}
+	rows := []struct {
+		file     int // 0 Dockerfile, 1 recipe, 2 .gitignore
+		old, new string
+	}{
+		{0, "COPY " + cacheProgramStaged + " " + cacheProgramPath + "\n", ""},
+		{0, "chmod 0755 " + cacheProgramPath, ""},
+		{0, "test -x " + cacheProgramPath, ""},
+		{0, `install -d -o "${BASE_USER}" ` + cacheProgramDir, ""},
+		{0, "ARG BASE_USER=ci\n", "ARG BASE_USER=ci\nENV GOCACHEPROG=" + cacheProgramPath + "\n"},
+		{1, `test -n "$(CI_BASE_IMAGE)"`, "true"},
+		{1, "exit 2", "exit 0"},
+		{1, "./cmd/gt-gocacheprog", "./cmd/gt"},
+		{1, "GOARCH=arm64", "GOARCH=amd64"},
+		{1, `mkdir -p "$(CI_BASE_CONTEXT)/bin";`, `docker build; mkdir -p "$(CI_BASE_CONTEXT)/bin";`},
+		{1, "; " + cacheImageRemove, " && " + cacheImageRemove},
+		{2, "/deploy/ci-base/bin/\n", ""},
+	}
+	for _, r := range rows {
+		texts := []string{dockerfile, recipe, gitignore}
+		texts[r.file] = mutate(t, texts[r.file], r.old, r.new)
+		if err := checkCIBaseCacheProgram(texts[0], texts[1], texts[2]); err == nil {
+			t.Errorf("the check accepted the mutation %q in %s", r.old, []string{"Dockerfile", "recipe", ".gitignore"}[r.file])
+		}
 	}
 }
