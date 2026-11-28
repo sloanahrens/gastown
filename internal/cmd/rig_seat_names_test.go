@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
@@ -168,6 +169,47 @@ func TestJoinSeatNames(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("joinSeatNames = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// townSeatNamesTown writes a town with the given registry and town settings
+// bodies; rigs alpha and beta each draw their pool from polecat_names.
+func townSeatNamesTown(t *testing.T, registry, settings string) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	if err := os.CopyFS(townRoot, fstest.MapFS{
+		"mayor/rigs.json":      {Data: []byte(registry)},
+		"settings/config.json": {Data: []byte(settings)},
+		"alpha/config.json":    {Data: []byte(`{"name":"alpha","polecat_names":["Kite","Gale"]}`)},
+		"beta/config.json":     {Data: []byte(`{"name":"beta","polecat_names":["Nova"]}`)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot
+}
+
+func TestTownSeatNames(t *testing.T) {
+	t.Parallel()
+	const goodRegistry = `{"version":1,"rigs":{"alpha":{"git_url":"x","added_at":"2026-01-01T00:00:00Z"},"beta":{"git_url":"x","added_at":"2026-01-01T00:00:00Z"}}}`
+	const goodSettings = `{"polecat_pool":{"seats":{"opus":{"cap":1,"names":["Aegis","NOVA"]}}}}`
+	for _, tc := range []struct {
+		name, registry, settings, wantErr string
+		want                              []string
+	}{
+		{"two rigs and the seat list yield all their names once, sorted", goodRegistry, goodSettings, "", []string{"aegis", "gale", "kite", "nova"}},
+		{"unreadable rig registry is an error and no names", "{not json", goodSettings, "rig registry", nil},
+		{"unreadable town settings is an error and no names", goodRegistry, "{not json", "settings/config.json", nil},
+		{"a seat that does not validate is an error and no names", goodRegistry, `{"polecat_pool":{"seats":{"opus":{"cap":1,"backend":"nope"}}}}`, "polecat_pool.seats.opus.backend", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := townSeatNames(townSeatNamesTown(t, tc.registry, tc.settings))
+			if (err == nil) != (tc.wantErr == "") || (err != nil && !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("townSeatNames error = %v, want one containing %q", err, tc.wantErr)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("townSeatNames = %v, want %v", got, tc.want)
 			}
 		})
 	}
