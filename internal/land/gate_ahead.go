@@ -8,14 +8,14 @@ import "context"
 // that fails runs no gate and ends the run with its reason, logged once.
 func (l *Lander) GateAhead(ctx context.Context, w Work, frontMerged string) bool {
 	g := l.open(l.Repo)
+	var cleanup func()
 	run := func(ctx context.Context, report func(merged string)) (AheadGate, error) {
-		// The build's cleanup is unused until gt-oh8tng gives the slot a discard
-		// that runs it: a car let go leaves its worktree and candidate behind.
-		dir, merged, _, err := l.gateAheadBuild(g, w, frontMerged)
+		dir, merged, c, err := l.gateAheadBuild(g, w, frontMerged)
 		if err != nil {
 			l.logf("%s: gate-ahead: not started: %v", w.BeadID, err)
 			return AheadGate{}, err
 		}
+		cleanup = c
 		// As Land does, so a log or a repair names the branch and commit CI
 		// tested rather than recomputing them.
 		w.CandidateBranch, w.CandidateHead = w.Candidate(), merged
@@ -26,5 +26,15 @@ func (l *Lander) GateAhead(ctx context.Context, w Work, frontMerged string) bool
 		// The slot stamps the key; the merged commit comes from the report.
 		return AheadGate{Result: res}, nil
 	}
-	return l.Ahead2.Start(ctx, w.BeadID, w.Head, frontMerged, run, func(AheadGate) {})
+	// A Take or Close that lets the car go runs this once the run has ended:
+	// the build's worktree is removed and the candidate branch the gate pushed
+	// is deleted, so the car leaves nothing behind (gt-oh8tng). The cleanup
+	// runs first, so a failed Discard cannot keep the worktree. The slot calls
+	// it only after the run reported a merged commit, the one point the build
+	// left a worktree.
+	discard := func(gate AheadGate) {
+		cleanup()
+		l.Candidate.Discard(context.WithoutCancel(ctx), w, gate.Result)
+	}
+	return l.Ahead2.Start(ctx, w.BeadID, w.Head, frontMerged, run, discard)
 }
