@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +68,49 @@ func openJournalAt(path string, now func() time.Time) (*Journal, error) {
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("gocacheprog: journal %s: %w", path, err), j.Close())
 	}
+	return j, nil
+}
+
+// OpenJournal opens a new journal in dir/journal under a random name. The
+// journal appears there only once it is locked and its start line is written.
+func OpenJournal(dir string, now func() time.Time) (*Journal, error) {
+	jdir := filepath.Join(dir, "journal")
+	if err := os.MkdirAll(jdir, 0o755); err != nil {
+		return nil, fmt.Errorf("gocacheprog: journal dir %s: %w", jdir, err)
+	}
+	name := fmt.Sprintf("%016x.log", rand.Uint64()) //nolint:gosec // G404: a file name, not a secret
+	return openJournalNamed(filepath.Join(jdir, name), now)
+}
+
+// openJournalNamed opens the journal at path through path+".tmp": the file is
+// locked and its start line written under the .tmp name, then renamed to path.
+// A failure removes the .tmp file and releases the lock. A .tmp that already
+// exists is refused and left alone, since this call did not make it.
+func openJournalNamed(path string, now func() time.Time) (*Journal, error) {
+	return openJournalNamedWith(path, now, os.Remove)
+}
+
+// openJournalNamedWith is openJournalNamed with remove deleting the .tmp file on failure.
+func openJournalNamedWith(path string, now func() time.Time, remove func(string) error) (*Journal, error) {
+	tmp := path + ".tmp"
+	if _, err := os.Lstat(tmp); err == nil {
+		return nil, fmt.Errorf("gocacheprog: journal %s: %s already exists", path, tmp)
+	}
+	// A file that was never created is not an error to remove.
+	removeTmp := func() error {
+		if err := remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("gocacheprog: journal %s: remove %s: %w", path, tmp, err)
+		}
+		return nil
+	}
+	j, err := openJournalAt(tmp, now)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("gocacheprog: journal %s: %w", path, err), removeTmp())
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return nil, errors.Join(fmt.Errorf("gocacheprog: journal %s: rename: %w", path, err), j.Close(), removeTmp())
+	}
+	j.path = path
 	return j, nil
 }
 
