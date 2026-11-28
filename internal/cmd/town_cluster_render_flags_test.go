@@ -32,6 +32,8 @@ func renderFlagsFixture() clusterRenderFlags {
 		confirmStopped:          true,
 		withHelper:              true,
 		proxyImage:              "registry.example.test/gastown/proxy@sha256:" + strings.Repeat("1", 64),
+		gatewayProxyCPU:         "500m",
+		registryProxyCPU:        "250m",
 		polecatImage:            "registry.example.test/gastown/polecat@sha256:" + strings.Repeat("2", 64),
 		configDir:               "/host/.config/gt",
 		openShellConfigDir:      "/host/.config/openshell",
@@ -443,6 +445,8 @@ var renderFlagRecordNames = map[string]string{
 	"confirmStopped":                "ConfirmStopped",
 	"withHelper":                    "WithHelper",
 	"proxyImage":                    "ProxyImage",
+	"gatewayProxyCPU":               "GatewayProxyCPU",
+	"registryProxyCPU":              "RegistryProxyCPU",
 	"polecatImage":                  "PolecatImage",
 	"configDir":                     "ConfigDir",
 	"openShellConfigDir":            "OpenShellConfigDir",
@@ -521,6 +525,66 @@ func TestRenderFlagsRecordCoversTheFlagStruct(t *testing.T) {
 		if name := recordType.Field(i).Name; !recorded[name] {
 			t.Errorf("renderFlagsRecord.%s holds no clusterRenderFlags field, so it is written and never replayed", name)
 		}
+	}
+}
+
+// TestClusterRenderRelayCPUFlags holds --gateway-proxy-cpu and
+// --registry-proxy-cpu to their Values fields and the recorded flags: each flag
+// defaults to empty, a named value is trimmed into Values, a recorded share
+// replays unless its flag is named, and a record written before the keys exist
+// loads both empty.
+func TestClusterRenderRelayCPUFlags(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"gateway-proxy-cpu", "registry-proxy-cpu"} {
+		if flag := townClusterRenderCmd.Flags().Lookup(name); flag == nil || flag.DefValue != "" {
+			t.Errorf("--%s = %v, want a flag whose default is the empty string", name, flag)
+		}
+	}
+	f := clusterRenderFixture(t)
+	f.gatewayProxyCPU, f.registryProxyCPU = " 500m ", "1"
+	d := clusterRenderDepsAt(t, clusterRenderTestTown(t), io.Discard)
+	v, _, _, err := clusterRenderValues(d, f, d.findTown)
+	if err != nil {
+		t.Fatalf("clusterRenderValues: %v", err)
+	}
+	if v.GatewayProxyCPU != "500m" || v.RegistryProxyCPU != "1" {
+		t.Errorf("Values carries %q/%q, want 500m/1", v.GatewayProxyCPU, v.RegistryProxyCPU)
+	}
+
+	// The fixture records both shares; one row per named-flag combination.
+	path := filepath.Join(t.TempDir(), "render-flags.json")
+	if err := saveRenderFlags(path, renderFlagsFixture()); err != nil {
+		t.Fatalf("saveRenderFlags: %v", err)
+	}
+	loaded, ok, err := loadRenderFlags(path)
+	if err != nil || !ok {
+		t.Fatalf("loadRenderFlags = (%t, %v), want the record", ok, err)
+	}
+	for _, tc := range []struct {
+		named                     []string
+		wantGateway, wantRegistry string
+	}{
+		{nil, "500m", "250m"},
+		{[]string{"gateway-proxy-cpu"}, "1", "250m"},
+		{[]string{"registry-proxy-cpu"}, "500m", "2"},
+	} {
+		given := clusterRenderFlags{gatewayProxyCPU: "1", registryProxyCPU: "2"}
+		replay, err := given.withRecorded(loaded, func(flag string) bool { return slices.Contains(tc.named, flag) })
+		if err != nil {
+			t.Fatalf("withRecorded %v: %v", tc.named, err)
+		}
+		if replay.gatewayProxyCPU != tc.wantGateway || replay.registryProxyCPU != tc.wantRegistry {
+			t.Errorf("replay with named %v carries %q/%q, want %q/%q",
+				tc.named, replay.gatewayProxyCPU, replay.registryProxyCPU, tc.wantGateway, tc.wantRegistry)
+		}
+	}
+	old := filepath.Join(t.TempDir(), "render-flags.json")
+	if err := os.WriteFile(old, []byte(`{"dir": "/repo/gastown"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := loadRenderFlags(old)
+	if err != nil || !ok || got.gatewayProxyCPU != "" || got.registryProxyCPU != "" {
+		t.Fatalf("the old record = %+v, ok %t, err %v; want both shares empty", got, ok, err)
 	}
 }
 
