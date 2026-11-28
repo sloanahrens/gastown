@@ -1313,6 +1313,45 @@ func TestCacheTrimShutdownDuringTheJobRun(t *testing.T) {
 	}
 }
 
+// TestCacheTrimShutdownDuringTheReads pins that a failed pod read and a failed
+// late-result read while the daemon shuts down record, park and raise nothing,
+// log one line leaving the trim to the restarted daemon, keep the pending mark
+// and leave the stale Job and a new Job alone. The late read fails on a result
+// line it cannot parse while the Job listing and the apply still answer, so a
+// pass that went on after it failed would delete the stale Job and apply one.
+func TestCacheTrimShutdownDuringTheReads(t *testing.T) {
+	t.Parallel()
+	for name, overrides := range map[string]map[string]cliReply{
+		"a pod read":         {"get pods -n " + cacheTrimNamespace + " -o json": {stderr: "error: connection refused", code: 1}},
+		"a late result read": {cacheTrimExistingVerb: {stdout: cacheTrimCompletedJSON}, cacheTrimClaimJobLogVerb: {stdout: "removed twelve absent 1 kept 3\n"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", overrides)
+			f.d.cacheTrimSetPending(cacheTrimNamespace, cacheTrimClaimName, true)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			f.d.ctx = ctx // the fake still answers, so the failure lands as the daemon leaves
+			if !viaJob(t, f, true, map[string]string{}) {
+				t.Fatalf("the pass = false, want true; log: %s", f.log.String())
+			}
+			runs, items, parked := f.jobRuns(t), f.noOpItems(t), f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName)
+			if applied, mark := f.applied(t), f.d.cacheTrimIsPending(cacheTrimNamespace, cacheTrimClaimName); len(runs) != 0 || len(items) != 0 || parked || len(applied) != 0 || !mark {
+				t.Errorf("runs %+v, items %+v, parked %v, applied %v, mark %v; want none recorded, parked, raised or applied and the mark kept; log: %s",
+					runs, items, parked, applied, mark, f.log.String())
+			}
+			for _, verb := range f.verbs() {
+				if strings.HasPrefix(verb, "delete job ") {
+					t.Errorf("the pass deleted the stale Job (%q); want it left in place", verb)
+				}
+			}
+			if n := strings.Count(f.log.String(), "the daemon is shutting down; the trim is left for the restarted daemon"); n != 1 {
+				t.Errorf("the shutdown line is logged %d times, want one; log: %s", n, f.log.String())
+			}
+		})
+	}
+}
+
 // TestCacheTrimIsPendingLoadErrorIsLoggedOnce pins that a fresh daemon whose
 // pending-mark file cannot be read answers not-pending and logs it once (gt-wcz9tm).
 func TestCacheTrimIsPendingLoadErrorIsLoggedOnce(t *testing.T) {
