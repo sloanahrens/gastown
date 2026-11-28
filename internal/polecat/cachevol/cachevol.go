@@ -224,6 +224,22 @@ func withinAgeFloor(used, now time.Time) bool {
 	return used.IsZero() || now.Sub(used) < buildCacheMinAge
 }
 
+// YoungBuildBytes returns the build-cache bytes the age floor keeps in the claim as of now: the sum
+// of Size over the build-cache entries within buildCacheMinAge, judged as PlanTrim judges them. A
+// zero now is refused as PlanTrim refuses it: by it every entry reads as younger than the floor.
+func YoungBuildBytes(listing []Entry, now time.Time) (int64, error) {
+	if now.IsZero() {
+		return 0, fmt.Errorf("the young build-cache figure needs the time its entries' ages are judged by: the zero time leaves every entry younger than the minimum age")
+	}
+	var total int64
+	for _, e := range listing {
+		if e.Cache == BuildCache && e.withinMinAge(now) {
+			total += e.Size
+		}
+	}
+	return total, nil
+}
+
 // BuildCacheInUse reports whether the trim container keeps the build-cache file rel, last modified
 // at mtime, as of now, so a file a seat has used since the listing is kept rather than deleted
 // under a running build; only a claim-relative path under the build cache can be in use.
