@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+// testGuard bounds each fetch in the tests below. Every case here expects an
+// answer, so no case is meant to hit it: a fetch that outlives the guard fails
+// its test instead of passing on a timeout, and a loaded host that pauses for
+// over a second does not turn a 200 into a false red.
+const testGuard = 10 * time.Second
+
 // serve starts a server answering every request with code and closes it when
 // the test ends.
 func serve(t *testing.T, code int) *httptest.Server {
@@ -47,7 +53,7 @@ func TestHealthLevels(t *testing.T) {
 		{Section: "legacy", Name: "site", URL: failed.URL},
 	}
 	at := time.Unix(1700000000, 0)
-	r := Check(context.Background(), apps, nil, Options{OffDir: offDir, Timeout: time.Second, Now: func() time.Time { return at }})
+	r := Check(context.Background(), apps, nil, Options{OffDir: offDir, Timeout: testGuard, Now: func() time.Time { return at }})
 
 	if r.At != at.Unix() {
 		t.Errorf("At = %d, want %d", r.At, at.Unix())
@@ -102,7 +108,7 @@ func TestOffMarkerSkipsTheFetch(t *testing.T) {
 		t.Fatal(err)
 	}
 	apps := []App{{Section: "gastown", Name: "web", URL: srv.URL}}
-	r := Check(context.Background(), apps, nil, Options{OffDir: offDir, Timeout: time.Second})
+	r := Check(context.Background(), apps, nil, Options{OffDir: offDir, Timeout: testGuard})
 
 	if r.Failed != 0 {
 		t.Errorf("Failed = %d, want 0 for an app that is off on purpose", r.Failed)
@@ -131,7 +137,7 @@ func TestNoAppMarkerIsNotRead(t *testing.T) {
 	}
 	// The URL answers 200, so a reader that consults <check>.off reports off
 	// instead of the checked answer.
-	r := Check(context.Background(), []App{{Name: "web", URL: answering.URL}}, nil, Options{OffDir: offDir, Timeout: time.Second})
+	r := Check(context.Background(), []App{{Name: "web", URL: answering.URL}}, nil, Options{OffDir: offDir, Timeout: testGuard})
 	if len(r.Rows) != 1 || r.Rows[0].Level != LevelOK {
 		t.Fatalf("rows = %+v, want one ok row: a check with no app= reads no marker", r.Rows)
 	}
@@ -152,7 +158,7 @@ func TestOffMarkerUnreadableFails(t *testing.T) {
 	// marker as "not off" reports ok instead of the failure it is.
 	answering := serve(t, http.StatusOK)
 
-	r := Check(context.Background(), []App{{Section: "gastown", Name: "web", URL: answering.URL}}, nil, Options{OffDir: notADir, Timeout: time.Second})
+	r := Check(context.Background(), []App{{Section: "gastown", Name: "web", URL: answering.URL}}, nil, Options{OffDir: notADir, Timeout: testGuard})
 	if len(r.Rows) != 1 || r.Rows[0].Level != LevelFail {
 		t.Fatalf("rows = %+v, want one fail row", r.Rows)
 	}
@@ -181,7 +187,7 @@ func TestRedirectIsNotFollowed(t *testing.T) {
 	}))
 	t.Cleanup(redirect.Close)
 
-	r := Check(context.Background(), []App{{Name: "web", URL: redirect.URL}}, nil, Options{Timeout: time.Second})
+	r := Check(context.Background(), []App{{Name: "web", URL: redirect.URL}}, nil, Options{Timeout: testGuard})
 	if len(r.Rows) != 1 || r.Rows[0].Level != LevelWarn {
 		t.Fatalf("rows = %+v, want one warn row", r.Rows)
 	}
@@ -194,7 +200,7 @@ func TestRedirectIsNotFollowed(t *testing.T) {
 // fetched is a failure, never a skipped check.
 func TestUnbuildableRequestFails(t *testing.T) {
 	t.Parallel()
-	r := Check(context.Background(), []App{{Name: "web", URL: "http://[::1"}}, nil, Options{Timeout: time.Second})
+	r := Check(context.Background(), []App{{Name: "web", URL: "http://[::1"}}, nil, Options{Timeout: testGuard})
 	if len(r.Rows) != 1 || r.Rows[0].Level != LevelFail || r.Failed != 1 {
 		t.Fatalf("rows = %+v, want one fail row", r.Rows)
 	}
@@ -208,7 +214,7 @@ func TestFetchErrorNamesNoURL(t *testing.T) {
 	goneURL := gone.URL
 	gone.Close()
 
-	r := Check(context.Background(), []App{{Name: "web", URL: goneURL + "/health?token=verysecret"}}, nil, Options{Timeout: time.Second})
+	r := Check(context.Background(), []App{{Name: "web", URL: goneURL + "/health?token=verysecret"}}, nil, Options{Timeout: testGuard})
 	if len(r.Rows) != 1 || r.Rows[0].Level != LevelFail {
 		t.Fatalf("rows = %+v, want one fail row", r.Rows)
 	}
