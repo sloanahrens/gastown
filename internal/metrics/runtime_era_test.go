@@ -347,6 +347,61 @@ func TestPrepareSplitsByRuntimeEra(t *testing.T) {
 	}
 }
 
+// TestEraMarks: the two runtime-era cuts become the trend's dated marks, each on
+// its cut's UTC calendar day and oldest first, and a cut that names no instant
+// gives no mark.
+func TestEraMarks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cuts EraCuts
+		want []PanelEvent
+	}{
+		{
+			name: "the live cuts, oldest first",
+			cuts: EraCuts{
+				Sandbox: time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC),
+				Pod:     time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC),
+			},
+			want: []PanelEvent{
+				{Date: "2026-10-29", What: "runtime era: sandbox"},
+				{Date: "2026-11-10", What: "runtime era: pod"},
+			},
+		},
+		{
+			// 2026-10-30T04:30 in a zone five hours ahead of UTC is 2026-10-29T23:30Z,
+			// so the mark keeps the UTC day rather than the cut's own zone's day.
+			name: "a cut at 23:30 UTC keeps its UTC day",
+			cuts: EraCuts{
+				Sandbox: time.Date(2026, 10, 30, 4, 30, 0, 0, time.FixedZone("UTC+5", 5*60*60)),
+			},
+			want: []PanelEvent{
+				{Date: "2026-10-29", What: "runtime era: sandbox"},
+			},
+		},
+		{
+			name: "only the pod cut set",
+			cuts: EraCuts{Pod: time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)},
+			want: []PanelEvent{
+				{Date: "2026-11-10", What: "runtime era: pod"},
+			},
+		},
+		{
+			name: "a zero cut gives no mark",
+			cuts: EraCuts{},
+			want: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := EraMarks(tc.cuts); !slices.Equal(got, tc.want) {
+				t.Errorf("EraMarks(%+v) = %+v, want %+v", tc.cuts, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestEraCountsTextWritesEachEraInOrder: the digest's words put each era's count
 // in era order and name an empty side as none.
 func TestEraCountsTextWritesEachEraInOrder(t *testing.T) {
