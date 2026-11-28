@@ -132,9 +132,9 @@ dindResources:
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := decodeControlValues([]byte(tc.body))
+			_, err := decodeValues("values.control.yaml", []byte(tc.body))
 			if err == nil {
-				t.Fatalf("decodeControlValues accepted %q", tc.body)
+				t.Fatalf("decodeValues accepted %q", tc.body)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error = %q, want it to name %q", err, tc.want)
@@ -204,9 +204,9 @@ dindResources:
 `
 	t.Run("decodes into Values.DindRequests", func(t *testing.T) {
 		t.Parallel()
-		v, err := decodeControlValues([]byte(base + "dindRequests:\n  cpu: \"4\"\n  memory: 8Gi\n"))
+		v, err := decodeValues("values.control.yaml", []byte(base+"dindRequests:\n  cpu: \"4\"\n  memory: 8Gi\n"))
 		if err != nil {
-			t.Fatalf("decodeControlValues: %v", err)
+			t.Fatalf("decodeValues: %v", err)
 		}
 		if want := (Share{CPU: "4", Memory: "8Gi"}); v.DindRequests != want {
 			t.Errorf("Values.DindRequests = %+v, want %+v", v.DindRequests, want)
@@ -214,9 +214,9 @@ dindResources:
 	})
 	t.Run("an unknown key under it is refused", func(t *testing.T) {
 		t.Parallel()
-		_, err := decodeControlValues([]byte(base + "dindRequests:\n  gpu: \"1\"\n"))
+		_, err := decodeValues("values.control.yaml", []byte(base+"dindRequests:\n  gpu: \"1\"\n"))
 		if err == nil {
-			t.Fatal("decodeControlValues accepted an unknown key under dindRequests")
+			t.Fatal("decodeValues accepted an unknown key under dindRequests")
 		}
 		if !strings.Contains(err.Error(), "gpu") {
 			t.Errorf("error = %q, want it to name %q", err, "gpu")
@@ -224,14 +224,90 @@ dindResources:
 	})
 	t.Run("a file without it leaves the share empty", func(t *testing.T) {
 		t.Parallel()
-		v, err := decodeControlValues([]byte(base))
+		v, err := decodeValues("values.control.yaml", []byte(base))
 		if err != nil {
-			t.Fatalf("decodeControlValues: %v", err)
+			t.Fatalf("decodeValues: %v", err)
 		}
 		if v.DindRequests != (Share{}) {
 			t.Errorf("Values.DindRequests = %+v, want the zero share", v.DindRequests)
 		}
 	})
+}
+
+// TestAuxValuesRender drives values.aux.yaml through AuxValues and Build: every
+// object carries the aux stem, the runner takes the one ci-aux label at capacity 1
+// with the engine's quota, each container asks for the shares the file names, and
+// the pod runs at the gate's priority class, which the sweep's preflight requires.
+func TestAuxValuesRender(t *testing.T) {
+	t.Parallel()
+	v, err := AuxValues()
+	if err != nil {
+		t.Fatalf("AuxValues: %v", err)
+	}
+	m := mustBuild(t, v)
+	const stem = "forgejo-runner-aux"
+	for _, tc := range []struct{ name, got, want string }{
+		{"the Deployment", m.Deployment.Metadata.Name, stem},
+		{"the ConfigMap", m.ConfigMap.Metadata.Name, stem + "-config"},
+		{"the engine claim", m.DindClaim.Metadata.Name, stem + "-dind"},
+		{"the data claim", m.RunnerClaim.Metadata.Name, stem + "-data"},
+		{"the namespace", m.Deployment.Metadata.Namespace, "forgejo"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+	cfg := decodeConfig(t, m)
+	if want := []string{"ci-aux:docker://ci-base:latest"}; !reflect.DeepEqual(cfg.Runner.Labels, want) {
+		t.Errorf("labels = %q, want %q", cfg.Runner.Labels, want)
+	}
+	if cfg.Runner.Capacity != 1 {
+		t.Errorf("capacity = %d, want 1", cfg.Runner.Capacity)
+	}
+	if got := cfg.Runner.Envs["CI_CPU_QUOTA"]; got != "4" {
+		t.Errorf("CI_CPU_QUOTA = %q, want the engine limit 4", got)
+	}
+	pod := m.Deployment.Spec.Template.Spec
+	if pod.PriorityClassName != PriorityClassName {
+		t.Errorf("priorityClassName = %q, want the gate runner's %q", pod.PriorityClassName, PriorityClassName)
+	}
+	for _, tc := range []struct {
+		container        string
+		requests, limits ResourceList
+	}{
+		{runnerContainerName, ResourceList{CPU: "200m", Memory: "256Mi"}, ResourceList{CPU: "200m", Memory: "256Mi"}},
+		{DindContainerName, ResourceList{CPU: "500m", Memory: "2Gi"}, ResourceList{CPU: "4", Memory: "6Gi"}},
+	} {
+		c := containerNamed(t, pod, tc.container)
+		if c.Resources.Requests != tc.requests {
+			t.Errorf("%s requests = %+v, want %+v", tc.container, c.Resources.Requests, tc.requests)
+		}
+		if c.Resources.Limits != tc.limits {
+			t.Errorf("%s limits = %+v, want %+v", tc.container, c.Resources.Limits, tc.limits)
+		}
+	}
+}
+
+// TestAuxValuesRefusesABadFile drives the two refusals the aux file can take: a key
+// Values does not have, and a second document. Each row appends its defect to the
+// embedded bytes, so the test reads the file the build reads.
+func TestAuxValuesRefusesABadFile(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, extra, want string }{
+		{"an unknown key", "dindCpu: 6\n", "dindCpu"},
+		{"a second document", "---\ncapacity: 3\n", "one YAML document"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := decodeValues("values.aux.yaml", []byte(string(auxValuesYAML)+tc.extra))
+			if err == nil {
+				t.Fatalf("decodeValues accepted the aux file with %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to name %q", err, tc.want)
+			}
+		})
+	}
 }
 
 // fieldNamed returns the field of t whose name matches key case-insensitively,
