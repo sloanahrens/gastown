@@ -303,6 +303,49 @@ func TestRunAppliesTheOptionalFlags(t *testing.T) {
 	}
 }
 
+// TestRunCarriesTheGoCacheProgValues drives the two cache program flags through
+// the command's render path (gt-8sng1g): the config.yml carries the exact
+// GOCACHEPROG command, the volume mount and valid_volumes row, and no cap is refused.
+func TestRunCarriesTheGoCacheProgValues(t *testing.T) {
+	t.Parallel()
+	t.Run("both flags reach config.yml", func(t *testing.T) {
+		t.Parallel()
+		stdout, stderr, code := runFor(t, append(goldenArgs(), "-go-cache-prog", "-go-cache-prog-max-bytes", "5368709120"))
+		if code != 0 {
+			t.Fatalf("exit %d, want 0 (stderr %q)", code, stderr)
+		}
+		var configMap forgejorunner.ConfigMap
+		for _, doc := range documents(t, stdout) {
+			if docRefOf(t, doc).Kind == "ConfigMap" {
+				mustDecode(t, doc, &configMap)
+			}
+		}
+		cfg := configMap.Data["config.yml"]
+		for _, want := range []string{
+			"GOCACHEPROG: '/usr/local/bin/gt-gocacheprog -dir /home/ci/.cache/gt-gocacheprog -max-bytes 5368709120'",
+			"-v ci-gocacheprog:/home/ci/.cache/gt-gocacheprog",
+			"    - 'ci-gocacheprog'",
+		} {
+			if !strings.Contains(cfg, want) {
+				t.Errorf("config.yml does not carry %q\n%s", want, cfg)
+			}
+		}
+	})
+	t.Run("no cap is refused", func(t *testing.T) {
+		t.Parallel()
+		stdout, stderr, code := runFor(t, append(goldenArgs(), "-go-cache-prog"))
+		if code != 2 {
+			t.Errorf("exit %d, want 2 (stderr %q)", code, stderr)
+		}
+		if !strings.Contains(stderr, "Values.GoCacheProgMaxBytes") {
+			t.Errorf("stderr does not name Values.GoCacheProgMaxBytes: %q", stderr)
+		}
+		if stdout != "" {
+			t.Errorf("stdout is not empty: %q", stdout)
+		}
+	})
+}
+
 func TestRunRefusesBadInput(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

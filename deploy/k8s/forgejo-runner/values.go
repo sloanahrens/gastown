@@ -38,6 +38,10 @@ type fileValues struct {
 	DindResources   Share    `yaml:"dindResources"`
 	DindRequests    Share    `yaml:"dindRequests"`
 	CPUQuota        string   `yaml:"cpuQuota"`
+	// GoCacheProg switches the job image's Go build cache program on;
+	// GoCacheProgMaxBytes caps its store (gt-8sng1g).
+	GoCacheProg         bool  `yaml:"goCacheProg"`
+	GoCacheProgMaxBytes int64 `yaml:"goCacheProgMaxBytes"`
 }
 
 // ControlValues returns the Values the control cluster's runner is built from:
@@ -72,17 +76,19 @@ func decodeValues(file string, data []byte) (Values, error) {
 		return Values{}, fmt.Errorf("reading %s: %w", file, err)
 	}
 	v := Values{
-		Name:            doc.Name,
-		Namespace:       doc.Namespace,
-		Labels:          doc.Labels,
-		Capacity:        doc.Capacity,
-		ForgejoHostIP:   doc.ForgejoHostIP,
-		DindStorage:     doc.DindStorage,
-		RunnerStorage:   doc.RunnerStorage,
-		RunnerResources: doc.RunnerResources,
-		DindResources:   doc.DindResources,
-		DindRequests:    doc.DindRequests,
-		CPUQuota:        doc.CPUQuota,
+		Name:                doc.Name,
+		Namespace:           doc.Namespace,
+		Labels:              doc.Labels,
+		Capacity:            doc.Capacity,
+		ForgejoHostIP:       doc.ForgejoHostIP,
+		DindStorage:         doc.DindStorage,
+		RunnerStorage:       doc.RunnerStorage,
+		RunnerResources:     doc.RunnerResources,
+		DindResources:       doc.DindResources,
+		DindRequests:        doc.DindRequests,
+		CPUQuota:            doc.CPUQuota,
+		GoCacheProg:         doc.GoCacheProg,
+		GoCacheProgMaxBytes: doc.GoCacheProgMaxBytes,
 	}
 	if err := v.validate(); err != nil {
 		return Values{}, fmt.Errorf("%s: %w", file, err)

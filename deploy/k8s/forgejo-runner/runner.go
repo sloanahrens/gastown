@@ -16,9 +16,12 @@
 // have no default, because a runner with no label takes no job and a pod that
 // cannot resolve forgejo cannot register.
 //
+// Values.GoCacheProg switches the job image's Go build cache program on: jobs
+// mount its store and runner.envs carries GOCACHEPROG (needs image gt-yiohwp).
+//
 // An operator verifies after applying what this package cannot: that the engine
 // issues its client certificate and the runner's TLS handshake succeeds, that a
-// job container mounts the three cache volumes, and that the forgejo alias
+// job container mounts its cache volumes, and that the forgejo alias
 // reaches Forgejo from the pod and from its job containers.
 package forgejorunner
 
@@ -144,6 +147,12 @@ const (
 	gomodCacheVolume = "ci-gomod"
 	gocacheVolume    = "ci-gocache"
 	npmCacheVolume   = "ci-npm"
+
+	// The cache program's store (gt-8sng1g), kept out of the cache volumes the
+	// walk trim trims; path and command come from the gate job image (gt-yiohwp).
+	gocacheprogVolume    = "ci-gocacheprog"
+	gocacheprogMountPath = cacheMountRoot + "/.cache/gt-gocacheprog"
+	gocacheprogCommand   = "/usr/local/bin/gt-gocacheprog"
 )
 
 var (
@@ -231,6 +240,10 @@ type Values struct {
 	// be a positive whole number no larger than the engine limit's whole cores.
 	// Empty derives those whole cores from DindResources.CPU (gt-j0da7b).
 	CPUQuota string
+	// GoCacheProg switches the job image's Go build cache program on (gt-8sng1g);
+	// GoCacheProgMaxBytes caps its store and must be positive when it is true.
+	GoCacheProg         bool
+	GoCacheProgMaxBytes int64
 }
 
 // Manifests is what Build returns, in the order Render writes them.
@@ -487,6 +500,9 @@ func (v Values) validate() error {
 	if err := validateCPUQuota(v.CPUQuota, v.DindResources.CPU); err != nil {
 		return err
 	}
+	if v.GoCacheProg && v.GoCacheProgMaxBytes <= 0 {
+		return fmt.Errorf("Values.GoCacheProgMaxBytes %d: want a positive byte cap when Values.GoCacheProg is true", v.GoCacheProgMaxBytes)
+	}
 	if !storageRE.MatchString(v.DindStorage) {
 		return fmt.Errorf("the engine claim storage %q: want a whole number and one of Ki, Mi, Gi or Ti, such as 40Gi", v.DindStorage)
 	}
@@ -654,6 +670,9 @@ func configYAML(v Values) (string, error) {
 	}
 	// The gate's cpuquota command reads the cores a job may use (gt-fvi3ny).
 	fmt.Fprintf(&b, "    CI_CPU_QUOTA: %s\n", yamlScalar(quota))
+	if v.GoCacheProg {
+		fmt.Fprintf(&b, "    GOCACHEPROG: %s\n", yamlScalar(gocacheprogValue(v)))
+	}
 	fmt.Fprintf(&b, "  timeout: %s\n", yamlScalar(RunnerTimeout))
 	fmt.Fprintf(&b, "  shutdown_timeout: %s\n", yamlScalar(ShutdownTimeout))
 	b.WriteString("  labels:\n")
@@ -667,8 +686,17 @@ func configYAML(v Values) (string, error) {
 	for _, mount := range cacheMounts {
 		fmt.Fprintf(&b, "    - %s\n", yamlScalar(mount.volume))
 	}
+	if v.GoCacheProg {
+		fmt.Fprintf(&b, "    - %s\n", yamlScalar(gocacheprogVolume))
+	}
 	fmt.Fprintf(&b, "    - %s\n", yamlScalar(certsClientDir))
 	return b.String(), nil
+}
+
+// gocacheprogValue is the GOCACHEPROG command runner.envs carries: the program,
+// its store directory and the store's cap in bytes.
+func gocacheprogValue(v Values) string {
+	return fmt.Sprintf("%s -dir %s -max-bytes %d", gocacheprogCommand, gocacheprogMountPath, v.GoCacheProgMaxBytes)
 }
 
 // wholeCPUs returns the whole number of cores cpu rounds up to: "6500m" is 7 and
@@ -693,14 +721,17 @@ func wholeCPUs(cpu string) (int, error) {
 }
 
 // containerOptions is what every job container is started with: the forgejo
-// alias its own /etc/hosts does not inherit from the pod, an init process that
-// reaps the job's orphans, the three cache volumes, and the engine's client
-// certificates the job steps read through DOCKER_CERT_PATH.
+// alias its own /etc/hosts lacks, an init process that reaps orphans, the three
+// cache volumes (plus the program's store when GoCacheProg is on), and the
+// engine's client certificates DOCKER_CERT_PATH names.
 func containerOptions(v Values) string {
-	parts := make([]string, 0, 4+2*len(cacheMounts))
+	parts := make([]string, 0, 6+2*len(cacheMounts))
 	parts = append(parts, "--add-host="+ForgejoHostname+":"+v.ForgejoHostIP, "--init")
 	for _, mount := range cacheMounts {
 		parts = append(parts, "-v", mount.volume+":"+mount.path)
+	}
+	if v.GoCacheProg {
+		parts = append(parts, "-v", gocacheprogVolume+":"+gocacheprogMountPath)
 	}
 	parts = append(parts, "-v", certsClientDir+":"+certsClientDir)
 	return strings.Join(parts, " ")
