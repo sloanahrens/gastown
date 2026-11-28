@@ -160,6 +160,7 @@ func newUpdateJobRig(t *testing.T, cfg *config.UpdateConfig) *updateJobRig {
 		return nil, errors.New("no resolver in this rig: " + host)
 	}
 	cluster := &fakeUpdateJob{made: map[string][]byte{}, entered: make(chan struct{}, 8), release: make(chan struct{})}
+	// In a synctest bubble this cleanup runs inside it, before synctest.Test returns, so a hung create waiting on release ends there.
 	t.Cleanup(func() { close(cluster.release) })
 	d.updateJob = cluster
 	// The rig's main tip is commits[2] and its verdict is green unless a test says
