@@ -298,6 +298,66 @@ func TestAheadSlotTakeCanceledLeavesTheCarHeld(t *testing.T) {
 	})
 }
 
+// TestAheadSlotTwoTakesOneGetsTheCar shows two Takes blocked on one held car
+// with exactly one returning the gate and the slot empty: the Take that finds
+// the car no longer held returns false.
+func TestAheadSlotTwoTakesOneGetsTheCar(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		release := make(chan struct{})
+		want := AheadGate{Bead: "gt-a", Head: "h1", Base: "main", Result: CandidateResult{State: CandidatePassed}}
+		var s AheadSlot
+		if !s.Start(ctx, "gt-a", "h1", "main", func(ctx context.Context, _ func(string)) (AheadGate, error) {
+			select {
+			case <-release:
+				return want, nil
+			case <-ctx.Done():
+				return AheadGate{}, ctx.Err()
+			}
+		}, nil) {
+			t.Fatal("Start on an empty slot = false, want true")
+		}
+		type taken struct {
+			gate AheadGate
+			ok   bool
+		}
+		results := make(chan taken, 2)
+		take := func() {
+			gate, ok := s.Take(ctx, "gt-a", "h1", "main")
+			results <- taken{gate, ok}
+		}
+		go take()
+		go take()
+		synctest.Wait()
+		if len(results) != 0 {
+			t.Fatal("a Take returned while the car was still held, want both blocked")
+		}
+		close(release)
+		synctest.Wait()
+		wins := 0
+		collect := func() {
+			select {
+			case r := <-results:
+				if r.ok && r.gate == want {
+					wins++
+				}
+			default:
+				t.Fatal("a Take has no result after the run ended")
+			}
+		}
+		collect()
+		collect()
+		if wins != 1 {
+			t.Errorf("Takes that got the result = %d, want exactly 1", wins)
+		}
+		if _, _, _, ok := s.Pending(); ok {
+			t.Error("Pending after the Takes = held, want empty")
+		}
+	})
+}
+
 // TestAheadSlotTakeWithEndedCtxReturnsAFinishedRun shows a Take whose ctx has
 // already ended still returning the result of a run that has already ended.
 func TestAheadSlotTakeWithEndedCtxReturnsAFinishedRun(t *testing.T) {
