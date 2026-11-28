@@ -18,13 +18,41 @@ func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 // stamp in step.
 var at = time.Date(2026, 11, 20, 16, 24, 0, 0, time.UTC)
 
-// read answers the two sysctl questions with load and ncpu.
-func read(load, ncpu string) func(string, ...string) (string, error) {
-	return func(_ string, args ...string) (string, error) {
+// sampler answers the sampler's reads from its fields; fail names the one step
+// whose read returns an error instead, so one test drives one refusal.
+type sampler struct {
+	load, ncpu, top, ps string
+	fail                string
+}
+
+func (s *sampler) read(_ time.Duration, name string, args ...string) (string, error) {
+	step, text := name, ""
+	switch name {
+	case "sysctl":
 		if args[1] == "hw.ncpu" {
-			return ncpu, nil
+			step, text = "hw.ncpu", s.ncpu
+		} else {
+			step, text = "vm.loadavg", s.load
 		}
-		return load, nil
+	case "top":
+		text = s.top
+	case "ps":
+		text = s.ps
+	}
+	if step == s.fail {
+		return "", errors.New("read failed")
+	}
+	return text, nil
+}
+
+// full answers every read a run makes with the samples; fail names the one step whose read fails instead (gt-phge44).
+func full(fail string) *sampler {
+	return &sampler{
+		load: "{ 21.53 22.70 21.14 }\n",
+		ncpu: "24\n",
+		top:  topReadSample,
+		ps:   procsSample,
+		fail: fail,
 	}
 }
 
@@ -32,35 +60,26 @@ func read(load, ncpu string) func(string, ...string) (string, error) {
 // path that cannot exist fails before any process starts (gt-emjwp9).
 func TestSysctlRefusesACommandThatCannotStart(t *testing.T) {
 	t.Parallel()
-	if out, err := sysctl("/nonexistent-gt-hostload-sysctl", "-n", "vm.loadavg"); err == nil || out != "" {
+	if out, err := sysctl(5*time.Second, "/nonexistent-gt-hostload-sysctl", "-n", "vm.loadavg"); err == nil || out != "" {
 		t.Errorf("sysctl = %q, %v: want an error and no output", out, err)
 	}
 }
 
-// TestHostLoadRunWritesOneLine: the two sysctl answers become one line in the
-// 20th's file under --dir, and a clean run prints nothing (gt-emjwp9).
-func TestHostLoadRunWritesOneLine(t *testing.T) {
+// TestHostLoadRunWritesBothLines: a full run writes the load line and the CPU line, and prints nothing (gt-fjznor).
+func TestHostLoadRunWritesBothLines(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	var stderr bytes.Buffer
-	if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, read("{ 21.53 22.70 21.14 }\n", "24\n")); code != 0 || stderr.Len() != 0 {
+	if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, full("").read); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("run = %d, stderr %q: want 0 and nothing", code, stderr.String())
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "2026-11-20.log"))
-	want := "2026-11-20T16:24:00Z load1=21.53 load5=22.70 load15=21.14 ncpu=24\n"
-	if err != nil || string(data) != want {
-		t.Errorf("2026-11-20.log = %q, %v: want %q", data, err, want)
+	load, err := os.ReadFile(filepath.Join(dir, "2026-11-20.log"))
+	if want := "2026-11-20T16:24:00Z load1=21.53 load5=22.70 load15=21.14 ncpu=24\n"; err != nil || string(load) != want {
+		t.Errorf("load file = %q, %v: want %q", load, err, want)
 	}
-}
-
-// failsOne answers both sysctl questions but fails the named one (gt-phge44).
-func failsOne(name string) func(string, ...string) (string, error) {
-	ok := read("{ 21.53 22.70 21.14 }", "24")
-	return func(n string, args ...string) (string, error) {
-		if args[1] == name {
-			return "", errors.New("sysctl: read failed")
-		}
-		return ok(n, args...)
+	cpu, err := os.ReadFile(filepath.Join(dir, "cpu", "2026-11-20.log"))
+	if want := "2026-11-20T16:24:00Z idle=6.68 mem_used=135291469824 mem_compressor=42949672960 sbx_cpu_s=- control_cpu_s=- docker_cpu_s=- scanner_cpu_s=125.25\n"; err != nil || string(cpu) != want {
+		t.Errorf("cpu file = %q, %v: want %q", cpu, err, want)
 	}
 }
 
@@ -69,7 +88,7 @@ func checkLoudFailure(t *testing.T, step string) {
 	t.Helper()
 	dir := t.TempDir()
 	var stderr bytes.Buffer
-	if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, failsOne(step)); code != 1 {
+	if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, full(step).read); code != 1 {
 		t.Errorf("run = %d, want 1", code)
 	}
 	if want := "gt-hostload: " + step + ": "; !strings.HasPrefix(stderr.String(), want) || strings.Count(stderr.String(), "\n") != 1 {
@@ -92,6 +111,45 @@ func TestHostLoadRunFailsLoudOnNcpu(t *testing.T) {
 	checkLoudFailure(t, "hw.ncpu")
 }
 
+// TestHostLoadRunCPUErrorStillWritesBothLines: a failing top read still writes
+// both lines, returns 1, and names the step once (gt-fjznor).
+func TestHostLoadRunCPUErrorStillWritesBothLines(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := full("top")
+	var stderr bytes.Buffer
+	if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, s.read); code != 1 {
+		t.Fatalf("run = %d, want 1", code)
+	}
+	if want := "gt-hostload: top: read failed\n"; stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+	load, err := os.ReadFile(filepath.Join(dir, "2026-11-20.log"))
+	if want := "2026-11-20T16:24:00Z load1=21.53 load5=22.70 load15=21.14 ncpu=24\n"; err != nil || string(load) != want {
+		t.Errorf("load file = %q, %v: want %q", load, err, want)
+	}
+	cpu, err := os.ReadFile(filepath.Join(dir, "cpu", "2026-11-20.log"))
+	if want := "2026-11-20T16:24:00Z idle=- mem_used=- mem_compressor=- sbx_cpu_s=- control_cpu_s=- docker_cpu_s=- scanner_cpu_s=125.25\n"; err != nil || string(cpu) != want {
+		t.Errorf("cpu file = %q, %v: want %q", cpu, err, want)
+	}
+}
+
+// TestHostLoadRunRefusesCPUAppend: a cpu path that cannot become a directory names the step and returns 1 (gt-fjznor).
+func TestHostLoadRunRefusesCPUAppend(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cpu"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, full("").read); code != 1 {
+		t.Fatalf("run = %d, want 1", code)
+	}
+	if want := "gt-hostload: cpu append: "; !strings.HasPrefix(stderr.String(), want) || strings.Count(stderr.String(), "\n") != 1 {
+		t.Errorf("stderr = %q, want one line starting %q", stderr.String(), want)
+	}
+}
+
 // TestHostLoadRunRefuses: each failing step names itself in one stderr line,
 // returns 1, and leaves no day file behind (gt-emjwp9).
 func TestHostLoadRunRefuses(t *testing.T) {
@@ -101,24 +159,21 @@ func TestHostLoadRunRefuses(t *testing.T) {
 	if err := os.WriteFile(file, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	boom := errors.New("boom")
-	bad := func(string, ...string) (string, error) { return "", boom }
+	badLoad := full("")
+	badLoad.load = "nonsense"
+	badNcpu := full("")
+	badNcpu.ncpu = "many"
 	for _, c := range []struct {
 		step string
 		args []string
-		read func(string, ...string) (string, error)
+		read func(time.Duration, string, ...string) (string, error)
 	}{
-		{"flags", []string{"--nope"}, read("{ 1 2 3 }", "2")},
-		{"vm.loadavg", []string{"--dir", dir}, bad},
-		{"vm.loadavg", []string{"--dir", dir}, read("nonsense", "2")},
-		{"hw.ncpu", []string{"--dir", dir}, func(_ string, args ...string) (string, error) {
-			if args[1] == "hw.ncpu" {
-				return "", boom
-			}
-			return "{ 1 2 3 }", nil
-		}},
-		{"hw.ncpu", []string{"--dir", dir}, read("{ 1 2 3 }", "many")},
-		{"append", []string{"--dir", file}, read("{ 1 2 3 }", "2")},
+		{"flags", []string{"--nope"}, full("").read},
+		{"vm.loadavg", []string{"--dir", dir}, full("vm.loadavg").read},
+		{"vm.loadavg", []string{"--dir", dir}, badLoad.read},
+		{"hw.ncpu", []string{"--dir", dir}, full("hw.ncpu").read},
+		{"hw.ncpu", []string{"--dir", dir}, badNcpu.read},
+		{"append", []string{"--dir", file}, full("").read},
 	} {
 		var stderr bytes.Buffer
 		if code := run(c.args, &stderr, func() time.Time { return at }, c.read); code != 1 {

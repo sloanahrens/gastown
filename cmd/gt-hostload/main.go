@@ -1,5 +1,6 @@
-// Command gt-hostload appends one host load line to a per-day file, for a
-// launchd job that runs it once a minute (gt-emjwp9).
+// Command gt-hostload appends one host load line and then one CPU line to
+// per-day files, for a launchd job that runs it once a minute (gt-emjwp9,
+// gt-fjznor).
 package main
 
 import (
@@ -23,19 +24,22 @@ func main() {
 
 // sysctl bounds each read, so a hung sysctl cannot hold the sampler past its
 // minute.
-func sysctl(name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func sysctl(timeout time.Duration, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, name, args...).Output() //nolint:gosec // G204: name and args are the sampler's fixed sysctl line
 	return string(out), err
 }
 
-// run appends one line to dir's day file and returns 0, or names the failing
-// step in one stderr line and returns 1.
-func run(args []string, stderr io.Writer, now func() time.Time, read func(name string, args ...string) (string, error)) int {
+// sysctlTimeout bounds each sysctl read; the CPU reads keep their own bounds.
+const sysctlTimeout = 5 * time.Second
+
+// run appends the load line and then the CPU line to dir's day files and
+// returns 0, or names each failing step in one stderr line and returns 1.
+func run(args []string, stderr io.Writer, now func() time.Time, read func(timeout time.Duration, name string, args ...string) (string, error)) int {
 	fs := flag.NewFlagSet("gt-hostload", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	dir := fs.String("dir", "", "directory of the per-day host load files")
+	dir := fs.String("dir", "", "directory of the per-day host load and CPU files")
 	if err := fs.Parse(args); err != nil {
 		return fail(stderr, "flags", err)
 	}
@@ -46,7 +50,7 @@ func run(args []string, stderr io.Writer, now func() time.Time, read func(name s
 		}
 		*dir = filepath.Join(home, "gt", ".runtime", "host-load")
 	}
-	text, err := read("sysctl", "-n", "vm.loadavg")
+	text, err := read(sysctlTimeout, "sysctl", "-n", "vm.loadavg")
 	if err != nil {
 		return fail(stderr, "vm.loadavg", err)
 	}
@@ -54,7 +58,7 @@ func run(args []string, stderr io.Writer, now func() time.Time, read func(name s
 	if err != nil {
 		return fail(stderr, "vm.loadavg", err)
 	}
-	cores, err := read("sysctl", "-n", "hw.ncpu")
+	cores, err := read(sysctlTimeout, "sysctl", "-n", "hw.ncpu")
 	if err != nil {
 		return fail(stderr, "hw.ncpu", err)
 	}
@@ -65,6 +69,17 @@ func run(args []string, stderr io.Writer, now func() time.Time, read func(name s
 	t := now()
 	if err := hostload.Append(*dir, t, hostload.Line(t, load, ncpu)); err != nil {
 		return fail(stderr, "append", err)
+	}
+	rec, errs := collectCPU(read)
+	for _, err := range errs {
+		fmt.Fprintf(stderr, "gt-hostload: %v\n", err)
+	}
+	if err := hostload.Append(filepath.Join(*dir, "cpu"), t, hostload.CPULine(t, rec)); err != nil {
+		fmt.Fprintf(stderr, "gt-hostload: cpu append: %v\n", err)
+		return 1
+	}
+	if len(errs) > 0 {
+		return 1
 	}
 	return 0
 }
