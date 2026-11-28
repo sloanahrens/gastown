@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,75 +10,76 @@ import (
 	"github.com/gofrs/flock"
 )
 
-// TestOpenshellHalfMadeClaim: a written claim names its session and gateway,
-// keeps a second writer out until it is unlocked, is unseen by the record
-// listing, and Remove deletes it (gt-5dw70j).
+// TestOpenshellHalfMadeClaim: a written claim names its session and gateway, a
+// second writer is refused until Unlock, the record listing sees neither file,
+// and Remove deletes the claim and frees the lock. A handle on the lock opened
+// before Remove still makes the next write refused (gt-5dw70j).
 func TestOpenshellHalfMadeClaim(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	c, err := writeSandboxClaim(town, "gt-box", "gw-one")
-	if err != nil {
-		t.Fatalf("writeSandboxClaim: %v", err)
+	const session = "gt-box"
+	c, err := writeSandboxClaim(town, session, "gw-one")
+	must(t, err)
+	data, err := os.ReadFile(sandboxClaimPath(town, session))
+	must(t, err)
+	var got sandboxClaimFile
+	must(t, json.Unmarshal(data, &got))
+	if want := (sandboxClaimFile{Session: session, Gateway: "gw-one"}); got != want {
+		t.Errorf("claim = %+v, want %+v", got, want)
 	}
-	path := sandboxClaimPath(town, "gt-box")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading the claim: %v", err)
+	if names := ListSandboxSessions(town); len(names) != 0 {
+		t.Errorf("ListSandboxSessions = %v, want the claim ignored", names)
 	}
-	if want := `{"session":"gt-box","gateway":"gw-one"}`; strings.TrimSpace(string(data)) != want {
-		t.Errorf("claim = %q, want %s", data, want)
+	if _, err := writeSandboxClaim(town, session, "gw-two"); err == nil {
+		t.Fatal("a second write while the claim is held succeeded, want it refused")
 	}
-	if got := ListSandboxSessions(town); len(got) != 0 {
-		t.Errorf("ListSandboxSessions = %v, want the claim ignored", got)
+	must(t, c.Unlock())
+	next, err := writeSandboxClaim(town, session, "gw-two")
+	must(t, err)
+	lockFile, err := os.Open(sandboxClaimLockPath(town, session))
+	must(t, err)
+	defer lockFile.Close()
+	must(t, next.Remove())
+	if _, err := os.Stat(sandboxClaimPath(town, session)); !os.IsNotExist(err) {
+		t.Errorf("stat of the claim after Remove = %v, want gone", err)
 	}
-	other := flock.New(path)
-	if ok, err := other.TryLock(); ok || err != nil {
-		t.Errorf("TryLock while held = %v, %v, want refused", ok, err)
+	stale := flock.New(sandboxClaimLockPath(town, session))
+	if ok, err := stale.TryLock(); !ok || err != nil {
+		t.Fatalf("TryLock after Remove = %v, %v, want taken", ok, err)
 	}
-	if err := c.Unlock(); err != nil {
-		t.Fatalf("Unlock: %v", err)
+	defer stale.Unlock()
+	lockInfo, err := lockFile.Stat()
+	must(t, err)
+	heldInfo, err := stale.Stat()
+	must(t, err)
+	if !os.SameFile(lockInfo, heldInfo) {
+		t.Fatal("the lock taken after Remove is not the file opened before it")
 	}
-	if ok, err := other.TryLock(); !ok || err != nil {
-		t.Fatalf("TryLock after Unlock = %v, %v, want taken", ok, err)
-	}
-	if err := other.Unlock(); err != nil {
-		t.Fatalf("unlocking the second holder: %v", err)
-	}
-	if err := c.Remove(); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("stat after Remove = %v, want gone", err)
+	if _, err := writeSandboxClaim(town, session, "gw-three"); err == nil {
+		t.Fatal("a write while the stale handle holds the lock succeeded, want it refused")
 	}
 }
 
-// TestOpenshellHalfMadeClaimRefusesWhatItCannotWrite: each failed step returns
-// its error and no claim, and a failed write leaves no claim file (gt-5dw70j).
-func TestOpenshellHalfMadeClaimRefusesWhatItCannotWrite(t *testing.T) {
+// TestOpenshellHalfMadeClaimRefuses: a bad name, a registry that cannot be made,
+// a lock that cannot be opened and a claim that cannot be written are errors
+// with no claim, and a failed write leaves the lock free (gt-5dw70j).
+func TestOpenshellHalfMadeClaimRefuses(t *testing.T) {
 	t.Parallel()
-	must := func(t *testing.T, err error) {
-		t.Helper()
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	const box = "gt-box"
+	const session = "gt-box"
 	cases := []struct {
-		name, wantErr string
-		session       string
-		block         func(t *testing.T, town string)
-		gone          bool
+		name, session, wantErr string
+		block                  func(t *testing.T, town string)
+		probe                  bool
 	}{
-		{"bad session name", "bad session name", "../gt-box", nil, true},
-		{"registry cannot be made", "creating the sandbox registry", box, func(t *testing.T, town string) {
-			must(t, os.WriteFile(filepath.Join(town, ".runtime"), []byte("x"), 0o600))
+		{"bad session name", "../gt-box", "bad session name", nil, false},
+		{"registry cannot be made", session, "creating the sandbox registry", func(t *testing.T, town string) {
+			must(t, os.WriteFile(filepath.Join(town, ".runtime"), nil, 0o600))
 		}, false},
-		{"claim cannot be locked", "locking the sandbox claim", box, func(t *testing.T, town string) {
-			must(t, os.MkdirAll(sandboxClaimPath(town, box), 0o700))
+		{"lock cannot be opened", session, "locking the sandbox claim", func(t *testing.T, town string) {
+			must(t, os.MkdirAll(sandboxClaimLockPath(town, session), 0o755))
 		}, false},
-		{"claim cannot be written", "writing the sandbox claim", box, func(t *testing.T, town string) {
-			must(t, os.MkdirAll(SandboxRegistryDir(town), 0o755))
-			must(t, os.WriteFile(sandboxClaimPath(town, box), []byte("{}\n"), 0o444))
+		{"claim cannot be written", session, "writing the sandbox claim", func(t *testing.T, town string) {
+			must(t, os.MkdirAll(sandboxClaimPath(town, session), 0o755))
 		}, true},
 	}
 	for _, tc := range cases {
@@ -92,11 +94,90 @@ func TestOpenshellHalfMadeClaimRefusesWhatItCannotWrite(t *testing.T) {
 				t.Fatalf("writeSandboxClaim = %v, want an error naming %q", err, tc.wantErr)
 			}
 			if c != nil {
-				t.Fatalf("writeSandboxClaim returned a claim alongside %v", err)
+				t.Fatal("a failed write returned a claim")
 			}
-			if _, statErr := os.Stat(sandboxClaimPath(town, tc.session)); tc.gone && !os.IsNotExist(statErr) {
-				t.Errorf("a failed write left its claim file: stat = %v", statErr)
+			if info, err := os.Stat(sandboxClaimPath(town, tc.session)); err == nil && info.Mode().IsRegular() {
+				t.Error("a failed write left a claim file")
+			}
+			if tc.probe {
+				requireSandboxLockFree(t, town, tc.session)
 			}
 		})
+	}
+}
+
+// TestOpenshellHalfMadeClaimRefusesHeldLock: a write while another holder has
+// the lock is refused, names the lock and leaves no claim (gt-5dw70j).
+func TestOpenshellHalfMadeClaimRefusesHeldLock(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	const session = "gt-box"
+	must(t, os.MkdirAll(SandboxRegistryDir(town), 0o755))
+	holder := flock.New(sandboxClaimLockPath(town, session))
+	if ok, err := holder.TryLock(); !ok || err != nil {
+		t.Fatalf("holder TryLock = %v, %v", ok, err)
+	}
+	c, err := writeSandboxClaim(town, session, "gw")
+	if err == nil || !strings.Contains(err.Error(), sandboxClaimLockPath(town, session)) {
+		t.Fatalf("writeSandboxClaim = %v, want an error naming the lock", err)
+	}
+	if c != nil {
+		t.Fatal("a refused write returned a claim")
+	}
+	if _, err := os.Stat(sandboxClaimPath(town, session)); !os.IsNotExist(err) {
+		t.Errorf("a refused write left a claim: stat = %v", err)
+	}
+	must(t, holder.Unlock())
+	requireSandboxLockFree(t, town, session)
+}
+
+// TestOpenshellHalfMadeClaimRefusesFailedRemove: a Remove whose delete fails
+// returns that error and still frees the lock (gt-5dw70j).
+func TestOpenshellHalfMadeClaimRefusesFailedRemove(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	const session = "gt-box"
+	c, err := writeSandboxClaim(town, session, "gw")
+	must(t, err)
+	path := sandboxClaimPath(town, session)
+	must(t, os.Remove(path))
+	// A directory with an entry in the claim's place: os.Remove cannot delete it.
+	must(t, os.MkdirAll(filepath.Join(path, "entry"), 0o755))
+	if err := c.Remove(); err == nil {
+		t.Fatal("Remove of a non-empty directory returned nil, want its error")
+	}
+	requireSandboxLockFree(t, town, session)
+}
+
+// TestOpenshellHalfMadeClaimRemoveGone: a Remove of a claim already deleted is
+// not an error, and it frees the lock (gt-5dw70j).
+func TestOpenshellHalfMadeClaimRemoveGone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	const session = "gt-box"
+	c, err := writeSandboxClaim(town, session, "gw")
+	must(t, err)
+	must(t, os.Remove(sandboxClaimPath(town, session)))
+	if err := c.Remove(); err != nil {
+		t.Fatalf("Remove of a gone claim = %v, want nil", err)
+	}
+	requireSandboxLockFree(t, town, session)
+}
+
+// requireSandboxLockFree fails the test unless session's lock can be taken, and
+// releases it again.
+func requireSandboxLockFree(t *testing.T, town, session string) {
+	t.Helper()
+	probe := flock.New(sandboxClaimLockPath(town, session))
+	if ok, err := probe.TryLock(); !ok || err != nil {
+		t.Fatalf("sandbox claim lock not free: TryLock = %v, %v", ok, err)
+	}
+	must(t, probe.Unlock())
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }
