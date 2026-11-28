@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	"github.com/steveyegge/gastown/internal/forwardwrap"
 )
 
 // forwardLoopbackBind is the only address the forward listens on. The dashboard
@@ -24,8 +25,8 @@ const forwardLoopbackBind = "127.0.0.1"
 // directories, which do not hold a Homebrew kubectl.
 const forwardPATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-// forwardKubectl is the client the job runs. launchd does not search PATH for a
-// job's program, so the plist names the absolute path the lookup resolves it to.
+// forwardKubectl is the client the job runs. The plist names it by the absolute
+// path the lookup resolves it to, so the wrapper does not rely on the job's PATH.
 const forwardKubectl = "kubectl"
 
 // forwardDNSLabel is an RFC 1123 label. The Service and namespace names reach an
@@ -110,9 +111,13 @@ func newForwardPlistCmd(home func() (string, error), lookPath func(string) (stri
 	c := &cobra.Command{
 		Use:   "plist",
 		Short: "Print the launchd job that port-forwards a Service to a loopback port",
-		Long: `Print a launchd property list for a job that runs kubectl port-forward of
+		Long: `Print a launchd property list for a job that forwards one Running pod of
 --service to 127.0.0.1:--port, restarting it if it exits. The job logs under
 ~/gt/daemon.
+
+The job runs a wrapper that picks the pod by the label
+app.kubernetes.io/name=<service> and forwards --port on that pod, so a roll ends
+the old forward and the restart resolves a new pod.
 
 The job runs the kubectl found on PATH, named in the plist by its absolute path:
 launchd does not search PATH for a job's program.
@@ -133,7 +138,7 @@ nothing is loaded into launchd and no cluster is contacted.`,
 	c.Flags().StringVar(&f.bind, "bind", forwardLoopbackBind,
 		"the address the forward listens on; only 127.0.0.1 is accepted")
 	c.Flags().IntVar(&f.port, "port", 0,
-		"the local and the Service port, 1 to 65535 (required)")
+		"the pod's port and the local port, 1 to 65535 (required)")
 	return c
 }
 
@@ -145,8 +150,8 @@ func newForwardBdGatewayCmd(home func() (string, error), lookPath func(string) (
 	c := &cobra.Command{
 		Use:   "bd-gateway",
 		Short: "Print the launchd job that forwards the bd gateway to 127.0.0.1:7440",
-		Long: `Print a launchd property list for a job that runs kubectl port-forward of
-svc/bd-gateway to 127.0.0.1:7440, restarting it if it exits. The job logs under
+		Long: `Print a launchd property list for a job that forwards the bd-gateway
+Service to 127.0.0.1:7440, restarting it if it exits. The job logs under
 ~/gt/daemon as forward-bd-gateway.log and forward-bd-gateway.err.log.
 
 The command only prints. The plist and the gateway URL go to stdout and stderr;
@@ -213,20 +218,23 @@ func (f forwardPlistFlags) validate() error {
 }
 
 // writeForwardPlist writes the property list for f to w, with its logs under home.
-// kubectl is the client's absolute path, which launchd needs to run the job.
+// kubectl is the client's absolute path, the wrapper's first positional value.
 // The template writes straight to w, so a failed write surfaces here.
 func writeForwardPlist(w io.Writer, home, kubectl string, f forwardPlistFlags) error {
 	logBase := filepath.Join(home, "gt", "daemon", "forward-"+f.service)
 	view := forwardPlistView{
 		Label: "com.gastown.forward-" + f.service,
 		Args: []string{
+			"/bin/sh",
+			"-c",
+			forwardwrap.Script,
+			"sh",
 			kubectl,
-			"--context=" + f.context,
-			"--namespace=" + f.namespace,
-			"port-forward",
-			"--address=" + f.bind,
-			"service/" + f.service,
-			fmt.Sprintf("%d:%d", f.port, f.port),
+			f.context,
+			f.namespace,
+			f.service,
+			f.bind,
+			fmt.Sprintf("%d", f.port),
 		},
 		PATH:   forwardPATH,
 		LogOut: logBase + ".log",

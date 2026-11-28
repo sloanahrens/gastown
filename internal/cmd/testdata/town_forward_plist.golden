@@ -6,13 +6,22 @@
 	<string>com.gastown.forward-dashboard</string>
 	<key>ProgramArguments</key>
 	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>pod=$(&quot;$1&quot; --context=&quot;$2&quot; --namespace=&quot;$3&quot; get pods -l &quot;app.kubernetes.io/name=$4&quot; --field-selector=status.phase=Running -o name | head -n 1)
+[ -n &quot;$pod&quot; ] || { echo &quot;no Running pod for app.kubernetes.io/name=$4&quot; &gt;&amp;2; exit 1; }
+&quot;$1&quot; --context=&quot;$2&quot; --namespace=&quot;$3&quot; port-forward --address=&quot;$5&quot; &quot;$pod&quot; &quot;$6&quot;:&quot;$6&quot; &amp;
+p=$!
+{ &quot;$1&quot; --context=&quot;$2&quot; --namespace=&quot;$3&quot; wait --for=delete &quot;$pod&quot; --timeout=8760h; kill &quot;$p&quot;; } &amp;
+wait &quot;$p&quot;
+exit 1</string>
+		<string>sh</string>
 		<string>/opt/homebrew/bin/kubectl</string>
-		<string>--context=colima-gt-control</string>
-		<string>--namespace=gt</string>
-		<string>port-forward</string>
-		<string>--address=127.0.0.1</string>
-		<string>service/dashboard</string>
-		<string>8787:8787</string>
+		<string>colima-gt-control</string>
+		<string>gt</string>
+		<string>dashboard</string>
+		<string>127.0.0.1</string>
+		<string>8787</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>

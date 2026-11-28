@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/forwardwrap"
 )
 
 const forwardPlistGoldenPath = "town_forward_plist.golden"
@@ -156,13 +158,16 @@ func TestTownForwardPlistGolden(t *testing.T) {
 	}
 
 	wantArgs := []string{
+		"/bin/sh",
+		"-c",
+		forwardwrap.Script,
+		"sh",
 		forwardPlistKubectl,
-		"--context=colima-gt-control",
-		"--namespace=gt",
-		"port-forward",
-		"--address=127.0.0.1",
-		"service/dashboard",
-		"8787:8787",
+		"colima-gt-control",
+		"gt",
+		"dashboard",
+		"127.0.0.1",
+		"8787",
 	}
 	if got := plistProgramArguments(t, out.String()); !slices.Equal(got, wantArgs) {
 		t.Errorf("program arguments = %q, want %q", got, wantArgs)
@@ -192,8 +197,9 @@ func TestTownForwardPlistPrintsTheAbsoluteKubectl(t *testing.T) {
 	if len(args) == 0 {
 		t.Fatalf("the plist has no ProgramArguments: %s", out.String())
 	}
-	if args[0] != kubectl {
-		t.Errorf("first program argument = %q, want the lookup's path %q", args[0], kubectl)
+	const clientArg = 4
+	if args[clientArg] != kubectl {
+		t.Errorf("program argument %d = %q, want the lookup's path %q", clientArg, args[clientArg], kubectl)
 	}
 }
 
@@ -362,13 +368,16 @@ func TestTownForwardBdGatewayPlistNamesTheService(t *testing.T) {
 		t.Errorf("stderr = %q, want %q", errOut.String(), wantStderr)
 	}
 	wantArgs := []string{
+		"/bin/sh",
+		"-c",
+		forwardwrap.Script,
+		"sh",
 		kubectl,
-		"--context=colima-gt-control",
-		"--namespace=gt",
-		"port-forward",
-		"--address=127.0.0.1",
-		"service/bd-gateway",
-		"7440:7440",
+		"colima-gt-control",
+		"gt",
+		"bd-gateway",
+		"127.0.0.1",
+		"7440",
 	}
 	if got := plistProgramArguments(t, out.String()); !slices.Equal(got, wantArgs) {
 		t.Errorf("program arguments = %q, want %q", got, wantArgs)
