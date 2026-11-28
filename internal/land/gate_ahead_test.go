@@ -3,11 +3,15 @@ package land
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/forgejo"
 )
 
 // approveAheadMerge stores a review approving the merge gateAheadBuild makes of
@@ -108,6 +112,70 @@ func TestGateAheadRunBuildErrorStartsNoGate(t *testing.T) {
 	})
 	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
 		t.Errorf("GateAhead wrote %d bead records, want 0", n)
+	}
+	assertNoWorkRootEntries(t, f)
+}
+
+// aheadGateCandidate gives the fixture a CandidateGate that pushes into its
+// remote and answers from client, and puts the gate workflow in main so the
+// candidate worktree carries it. The gate comes back so a test can point its
+// log at a buffer.
+func aheadGateCandidate(t *testing.T, f *landFixture, l *Lander, client *fakeForgejo) *CandidateGate {
+	t.Helper()
+	f.base = f.git.Commit(t, f.origin, "main", "main: add the gate workflow",
+		map[string]string{GateWorkflowPath("gate"): gateWorkflowYAML})
+	gate := fastGate(client)
+	l.Candidate = gate
+	return gate
+}
+
+// TestGateAheadRunDiscardRemovesWorktreeAndBranch is gt-oh8tng: a car let go
+// after its run ends removes the build's worktree and deletes the candidate
+// branch the gate pushed.
+func TestGateAheadRunDiscardRemovesWorktreeAndBranch(t *testing.T) {
+	t.Parallel()
+	f, l, _ := keyFixture(t)
+	client := &fakeForgejo{statuses: []forgejo.CommitStatus{status(forgejo.StateSuccess, "ci / gate (push)")}}
+	aheadGateCandidate(t, f, l, client)
+	approveAheadMerge(t, f, l)
+	var slot AheadSlot
+	l.Ahead2 = &slot
+	synctest.Test(t, func(t *testing.T) {
+		if !l.GateAhead(context.Background(), f.work, f.base) {
+			t.Fatal("GateAhead = false, want true: a run should start")
+		}
+		slot.Close()
+	})
+	if want := []string{"land/" + f.work.BeadID}; !slices.Equal(client.deleted, want) {
+		t.Fatalf("deleted %v, want the candidate branch %v", client.deleted, want)
+	}
+	assertNoWorkRootEntries(t, f)
+}
+
+// TestGateAheadRunDiscardFailureLogsAndStillCleans is gt-oh8tng: a failed
+// candidate discard is logged with the bead and the build's worktree is
+// removed anyway.
+func TestGateAheadRunDiscardFailureLogsAndStillCleans(t *testing.T) {
+	t.Parallel()
+	f, l, _ := keyFixture(t)
+	client := &fakeForgejo{
+		statuses:  []forgejo.CommitStatus{status(forgejo.StateSuccess, "ci / gate (push)")},
+		deleteErr: errors.New("forgejo: DELETE returned 500"),
+	}
+	gate := aheadGateCandidate(t, f, l, client)
+	var out strings.Builder
+	gate.Out = &out
+	approveAheadMerge(t, f, l)
+	var slot AheadSlot
+	l.Ahead2 = &slot
+	synctest.Test(t, func(t *testing.T) {
+		if !l.GateAhead(context.Background(), f.work, f.base) {
+			t.Fatal("GateAhead = false, want true: a run should start")
+		}
+		slot.Close()
+	})
+	if want := f.work.BeadID + ": could not delete the candidate"; !strings.Contains(out.String(), want) {
+		t.Fatalf("log = %q, want it to carry %q", out.String(), want)
 	}
 	assertNoWorkRootEntries(t, f)
 }
