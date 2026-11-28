@@ -27,22 +27,28 @@ var cacheCmd = newCacheCmd(cacheNeedRealDeps())
 func init() { rootCmd.AddCommand(cacheCmd) }
 
 // cacheNeedDeps are the seams a test substitutes: the town, the clock, the read.
+// The read also returns the ledger's skipped-line count, which counts every
+// undecodable line in the ledger, not only this job's.
 type cacheNeedDeps struct {
 	findTown func() (string, error)
 	now      func() time.Time
-	tail     func(townRoot, job string, n int) ([]jobledger.Run, error)
+	tail     func(townRoot, job string, n int) ([]jobledger.Run, int, error)
 }
 
 func cacheNeedRealDeps() cacheNeedDeps {
 	return cacheNeedDeps{
 		findTown: workspace.FindFromCwdOrError,
 		now:      time.Now,
-		tail: func(townRoot, job string, n int) ([]jobledger.Run, error) {
+		tail: func(townRoot, job string, n int) ([]jobledger.Run, int, error) {
 			ledger, err := jobledger.NewLedger(townRoot)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
-			return ledger.Tail(job, n)
+			runs, err := ledger.Tail(job, n)
+			if err != nil {
+				return nil, 0, err
+			}
+			return runs, ledger.Skipped(), nil
 		},
 	}
 }
@@ -67,7 +73,7 @@ counted runs' own, so a ledger rotated by size shows less than --days.`,
 			if days < 1 {
 				return &ExitCodeError{Code: 2, Err: fmt.Errorf("--days must be at least 1, got %d", days)}
 			}
-			return runCacheNeed(cmd.OutOrStdout(), deps, days, headroom, asJSON)
+			return runCacheNeed(cmd.OutOrStdout(), cmd.ErrOrStderr(), deps, days, headroom, asJSON)
 		},
 	}
 	c.Flags().IntVar(&days, "days", 7, "Count runs ending within this many days")
@@ -109,19 +115,27 @@ func cacheNeedRows(byJob map[string]cacheneed.Row) []cacheNeedRow {
 }
 
 // runCacheNeed reads every job's runs and prints one row per job. A failed
-// ledger read returns before anything is printed.
-func runCacheNeed(out io.Writer, deps cacheNeedDeps, days, headroom int, asJSON bool) error {
+// ledger read returns before anything is printed. Undecodable ledger lines
+// warn once on errOut and leave the rows and the result unchanged.
+func runCacheNeed(out, errOut io.Writer, deps cacheNeedDeps, days, headroom int, asJSON bool) error {
 	townRoot, err := deps.findTown()
 	if err != nil {
 		return fmt.Errorf("find the town root: %w", err)
 	}
 	var runs []jobledger.Run
+	skipped := 0
 	for _, job := range cacheNeedJobs {
-		got, err := deps.tail(townRoot, job, cacheNeedTailRuns)
+		got, n, err := deps.tail(townRoot, job, cacheNeedTailRuns)
 		if err != nil {
 			return fmt.Errorf("read the job ledger for %s: %w", job, err)
 		}
 		runs = append(runs, got...)
+		skipped = max(skipped, n)
+	}
+	if skipped > 0 {
+		if _, err := fmt.Fprintf(errOut, "gt cache need: %d ledger line(s) could not be decoded; the figures may be understated\n", skipped); err != nil {
+			return err
+		}
 	}
 	rows, err := cacheneed.Compute(runs, deps.now().Add(-time.Duration(days)*24*time.Hour), headroom)
 	if err != nil {
