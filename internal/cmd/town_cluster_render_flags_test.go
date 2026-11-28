@@ -437,6 +437,7 @@ var renderFlagRecordNames = map[string]string{
 	"namespace":                     "Namespace",
 	"rehearsal":                     "Rehearsal",
 	"cpu":                           "CPU",
+	"cpuRequest":                    "CPURequest",
 	"memory":                        "Memory",
 	"hostGateway":                   "HostGateway",
 	"confirmStopped":                "ConfirmStopped",

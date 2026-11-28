@@ -42,6 +42,7 @@ type renderFlagsRecord struct {
 	Namespace                     string `json:"namespace"`
 	Rehearsal                     bool   `json:"rehearsal"`
 	CPU                           string `json:"cpu"`
+	CPURequest                    string `json:"cpu_request"`
 	Memory                        string `json:"memory"`
 	HostGateway                   string `json:"host_gateway"`
 	ConfirmStopped                bool   `json:"confirm_container_stopped"`
@@ -102,6 +103,7 @@ func (f clusterRenderFlags) record() renderFlagsRecord {
 		Namespace:                     f.namespace,
 		Rehearsal:                     f.rehearsal,
 		CPU:                           f.cpu,
+		CPURequest:                    f.cpuRequest,
 		Memory:                        f.memory,
 		HostGateway:                   f.hostGateway,
 		ConfirmStopped:                f.confirmStopped,
@@ -145,6 +147,7 @@ func (r renderFlagsRecord) flags() clusterRenderFlags {
 		namespace:                     r.Namespace,
 		rehearsal:                     r.Rehearsal,
 		cpu:                           r.CPU,
+		cpuRequest:                    r.CPURequest,
 		memory:                        r.Memory,
 		hostGateway:                   r.HostGateway,
 		confirmStopped:                r.ConfirmStopped,
