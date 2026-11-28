@@ -1,8 +1,17 @@
 package gocacheprog
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"maps"
+	"os"
+	"slices"
+	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
 // IndexEntry is one action's output, its size and last use. PutTime is the time of
@@ -61,4 +70,83 @@ func putWins(r Record, e IndexEntry) bool {
 		return r.OutputID > e.OutputID
 	}
 	return r.Size > e.Size
+}
+
+// snapshotLine is one line of the snapshot file: an action id and its entry.
+type snapshotLine struct {
+	Action string    `json:"action"`
+	Output string    `json:"output"`
+	Size   int64     `json:"size"`
+	Put    time.Time `json:"put"`
+	Use    time.Time `json:"use"`
+}
+
+// ReadSnapshot reads the index snapshot at path. A missing file is an empty index.
+// Any other problem is an error naming the file: sizes cannot be rebuilt without the
+// snapshot, so a damaged one is never read as empty.
+func ReadSnapshot(path string) (Index, error) {
+	idx := Index{}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return idx, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("gocacheprog: snapshot %s: %w", path, err)
+	}
+	// WriteSnapshot ends every line with a newline, so text after the last one was cut off.
+	lines := strings.Split(string(data), "\n")
+	if lines[len(lines)-1] != "" {
+		return nil, fmt.Errorf("gocacheprog: snapshot %s: last line is cut off", path)
+	}
+	for n, line := range lines[:len(lines)-1] {
+		action, e, err := decodeSnapshotLine([]byte(line))
+		if _, dup := idx[action]; err == nil && dup {
+			err = errors.New("repeated action")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("gocacheprog: snapshot %s: line %d: %w", path, n+1, err)
+		}
+		idx[action] = e
+	}
+	return idx, nil
+}
+
+// decodeSnapshotLine decodes one snapshot line and refuses an entry the reader cannot
+// trust: ids must be hex, size non-negative, put and last-use times set.
+func decodeSnapshotLine(line []byte) (string, IndexEntry, error) {
+	var l snapshotLine
+	if err := json.Unmarshal(line, &l); err != nil {
+		return "", IndexEntry{}, err
+	}
+	switch {
+	case !validID([]byte(l.Action)):
+		return "", IndexEntry{}, errors.New("action id is empty or not hex")
+	case !validID([]byte(l.Output)):
+		return "", IndexEntry{}, errors.New("output id is empty or not hex")
+	case l.Size < 0:
+		return "", IndexEntry{}, errors.New("negative size")
+	case l.Put.IsZero():
+		return "", IndexEntry{}, errors.New("no put time")
+	case l.Use.IsZero():
+		return "", IndexEntry{}, errors.New("no last use")
+	}
+	return l.Action, IndexEntry{OutputID: l.Output, Size: l.Size, PutTime: l.Put, LastUse: l.Use}, nil
+}
+
+// WriteSnapshot writes idx to path as one JSON line per entry, in action id order,
+// through atomicfile so a reader sees the old snapshot or the new one.
+func WriteSnapshot(path string, idx Index) error {
+	var data []byte
+	for _, action := range slices.Sorted(maps.Keys(idx)) {
+		e := idx[action]
+		line, err := json.Marshal(snapshotLine{Action: action, Output: e.OutputID, Size: e.Size, Put: e.PutTime, Use: e.LastUse})
+		if err != nil {
+			return fmt.Errorf("gocacheprog: snapshot %s: encode %s: %w", path, action, err)
+		}
+		data = append(append(data, line...), '\n')
+	}
+	if err := atomicfile.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("gocacheprog: snapshot %s: %w", path, err)
+	}
+	return nil
 }
