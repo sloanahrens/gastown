@@ -616,7 +616,7 @@ func runnerRollDepsForValues(townRoot string, exec podExec, seam runnerRollRunsS
 		now:      time.Now,
 		signals:  liveRollSignals,
 		apply: runnerApplier{
-			kubectl:     realRunFunc(),
+			kubectl:     runnerKubeContextRun(os.Getenv, realRunFunc()),
 			values:      values,
 			build:       forgejorunner.Build,
 			encode:      forgejorunner.YAML,
@@ -820,7 +820,7 @@ type runnerResizeDeps struct {
 // and the flag's CPU.
 func runnerResizeDepsFor(out io.Writer, cpu string) runnerResizeDeps {
 	return runnerResizeDeps{
-		kubectl: realRunFunc(),
+		kubectl: runnerKubeContextRun(os.Getenv, realRunFunc()),
 		values:  forgejorunner.ControlValues,
 		build:   forgejorunner.Build,
 		encode:  forgejorunner.YAML,
