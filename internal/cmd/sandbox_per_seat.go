@@ -28,14 +28,14 @@ gt sandbox per-seat polecat-k8s off`,
 	},
 }
 
-// perSeatValue is the value a state sets. on has none yet, so it is refused before
-// the town is read.
+// perSeatValue is the value a state sets. on sets true but is refused: it has no
+// build yet, so it fails before the town is read.
 func perSeatValue(state string) (bool, error) {
 	switch state {
 	case "off":
 		return false, nil
 	case "on":
-		return false, errors.New("sandbox per-seat on is not built yet: only off is")
+		return true, errors.New("sandbox per-seat on is not built yet: only off is")
 	}
 	return false, fmt.Errorf("sandbox per-seat: unknown state %q: want off", state)
 }
