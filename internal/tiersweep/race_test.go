@@ -432,9 +432,10 @@ func TestRaceRunsWithPackages(t *testing.T) {
 			t.Fatalf("raceRunsWithPackages() error = %v, want nil", err)
 		}
 		want := append(slices.Clone(before), raceRun{
-			pkgs:  []string{"./alpha", "./zeta"},
-			args:  []string{"-race"},
-			label: "all-packages",
+			pkgs:   []string{"./alpha", "./zeta"},
+			args:   []string{"-race"},
+			label:  "all-packages",
+			pooled: true,
 		})
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("raceRunsWithPackages() = %v, want %v", got, want)
@@ -455,6 +456,22 @@ func TestRaceRunsWithPackages(t *testing.T) {
 			t.Errorf("raceRunsWithPackages() = %v on error, want nil so no run starts", got)
 		}
 	})
+}
+
+// TestRaceAllPackagesPooled: only the all-packages entry runs its packages on
+// the pool; raceRuns' own entries keep their serial.txt packages alone
+// (gt-ut8721).
+func TestRaceAllPackagesPooled(t *testing.T) {
+	t.Parallel()
+	runs, err := raceRunsWithPackages(&Sweep{Src: raceRepo([]string{"alpha/a_test.go"}, nil)})
+	if err != nil {
+		t.Fatalf("raceRunsWithPackages() error = %v, want nil", err)
+	}
+	for _, run := range runs {
+		if want := run.label == "all-packages"; run.pooled != want {
+			t.Errorf("entry %q pooled = %v, want %v: only the all-packages entry runs every package on its workers", run.label, run.pooled, want)
+		}
+	}
 }
 
 // TestRaceEntryPooled: a pooled entry starts its serial.txt package beside the
