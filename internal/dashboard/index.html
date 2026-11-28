@@ -2310,8 +2310,9 @@ function landingTable(s, names, rows, waiting) {
     tr.append(el("span", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
     tr.append(el("span", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
     // A reused landing ran no om, so its om cell says the review was reused
-    // rather than drawing the dash of a landing with no review (gt-amwavi).
-    tr.append(el("span", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : (r.om_reused ? "reused" : "–")));
+    // rather than drawing the dash of a landing with no review (gt-amwavi). Its
+    // stored review's time, when it has one, stands before the word (gt-qr62xp).
+    tr.append(el("span", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) + (r.om_reused ? " reused" : "") : (r.om_reused ? "reused" : "–")));
     const ship = el("span", "n" + (r.ship_pending ? " warnc" : ""));
     const appRig = r.ship_via === "staging";
     if (r.ship_secs != null) { ship.textContent = Math.round(r.ship_secs / 60) + "m"; ship.title = appRig ? "dispatched to staging deployed" : "dispatched to deployed"; }
