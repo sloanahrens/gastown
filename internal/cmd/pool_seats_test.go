@@ -2024,3 +2024,45 @@ func TestRosterLogsTheProbedWorktreeCount(t *testing.T) {
 		t.Fatalf("a tick with no roster logged a probe count:\n%s", out.String())
 	}
 }
+
+// TestPoolSandboxlessCount pins the switch-on: a submitted sandbox seat whose
+// sandbox record is gone holds no pool slot, and the same seat with a record
+// still counts (gt-z276ne). It reads through the production count, so the
+// filter has to be wired into that count, not merely exist beside it.
+func TestPoolSandboxlessCount(t *testing.T) {
+	t.Parallel()
+	const settings = `{"type":"town-settings","version":1,"sandboxes":{"p":{"image":"i","policy":"p"}},"polecat_pool":{"seats":{"sandbox":{"cap":1,"backend":"openshell","sandbox":"p"},"host":{"cap":1}}}}`
+	now := time.Date(2026, time.November, 27, 17, 30, 0, 0, time.UTC)
+	cases := []struct {
+		name   string
+		record bool
+		want   string
+	}{
+		{"submitted sandbox seat with no record is not counted", false, ""},
+		{"submitted sandbox seat with a record is counted", true, "landing/gastown/p"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town, _ := writeProfileTown(t, settings)
+			writeLandingSeatOnAgent(t, town, "gastown", "p", "gt-p", "sandbox")
+			if c.record {
+				if err := session.WriteSandboxRecord(town, session.SandboxRecord{Session: "ga-p", Rig: "gastown", Polecat: "p"}); err != nil {
+					t.Fatalf("WriteSandboxRecord: %v", err)
+				}
+			}
+			got, _, err := poolOccupiedSessionsProbed(&fakeLister{}, town, freeDeadSeats, submittedWork("gt-p"),
+				seatPool("sandbox", 3), func() time.Time { return now }, func(string, string, string) bool { return false })
+			if err != nil {
+				t.Fatalf("poolOccupiedSessionsProbed: %v", err)
+			}
+			var names []string
+			for _, s := range got {
+				names = append(names, s.name)
+			}
+			if joined := strings.Join(names, ","); joined != c.want {
+				t.Fatalf("occupied seats = %q, want %q", joined, c.want)
+			}
+		})
+	}
+}

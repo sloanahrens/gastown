@@ -154,6 +154,13 @@ func poolOccupiedSessionsProbed(t sessionLister, townRoot string, disposition po
 	if err != nil {
 		return nil, probed, &poolOccupancyError{err: err}
 	}
+	// A sandbox seat with no sandbox record runs no worker, so it holds no cap
+	// slot (gt-z276ne). The filter runs on the surviving seats so the dead and
+	// landing reads are both covered; a record read that fails keeps the seat,
+	// since an unreadable registry is not evidence the seat is free.
+	if townRoot != "" {
+		occupied = withoutSandboxlessSeats(occupied, poolSandboxAgentRead(townRoot, os.Stderr), poolSandboxRecordRead(townRoot))
+	}
 	return occupied, probed, nil
 }
 
