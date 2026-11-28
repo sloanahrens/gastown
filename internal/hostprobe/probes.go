@@ -139,6 +139,10 @@ type Probes struct {
 	// before the field decodes to nil, which a reader takes as unknown, not as
 	// a trim at the zero time.
 	GoCacheTrim *Field[GoCacheTrim] `json:"go_cache_trim"`
+	// ForgejoBackup is a pointer for the same reason as Launchd: a file written
+	// before the field decodes to nil, which a reader takes as unknown, not as
+	// a dump at the zero time.
+	ForgejoBackup *Field[ForgejoBackup] `json:"forgejo_backup"`
 }
 
 // Path is the probe file under townRoot: the host agent writes it there and a
