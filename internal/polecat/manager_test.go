@@ -2493,7 +2493,7 @@ func TestManagerAgentLifecycleUsesRigLocalBeadsDir(t *testing.T) {
 	agentID := "gt-gastown-polecat-rust"
 
 	m := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, nil, nil, bd)
-	if err := m.createAgentBeadWithRetry(agentID, &beads.AgentFields{RoleType: "polecat", Rig: rigName, AgentState: "spawning", HookBead: "gt-work"}); err != nil {
+	if err := m.createAgentBeadWithRetry("rust", &beads.AgentFields{RoleType: "polecat", Rig: rigName, AgentState: "spawning", HookBead: "gt-work"}); err != nil {
 		t.Fatalf("createAgentBeadWithRetry: %v", err)
 	}
 	if err := m.resetAgentBeadForReuse(agentID, "test reset"); err != nil {

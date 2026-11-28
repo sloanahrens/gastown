@@ -638,13 +638,17 @@ func (m *Manager) CheckDoltServerCapacity() error {
 }
 
 // createAgentBeadWithRetry wraps beads.CreateOrReopenAgentBead with retry logic.
+// It takes the polecat's name and derives the agent bead id from it, so each
+// caller names the seat once.
 // For transient Dolt failures (server exists but write fails), retries with backoff
 // and fails hard — a polecat without an agent bead is untrackable.
 // If beads is not configured (no .beads directory), warns and returns nil
 // since this indicates a test/setup environment, not a Dolt failure.
 // Fails fast on configuration/initialization errors (gt-2ra) — these are not
 // transient and retrying them wastes ~3 minutes for identical failures.
-func (m *Manager) createAgentBeadWithRetry(agentID string, fields *beads.AgentFields) error {
+func (m *Manager) createAgentBeadWithRetry(name string, fields *beads.AgentFields) error {
+	m.recordSlungAgent(name, fields)
+	agentID := m.agentBeadID(name)
 	var lastErr error
 	for attempt := 1; attempt <= doltMaxRetries; attempt++ {
 		_, err := beads.CreateOrReopenAgentBead(m.agentBeads(), agentID, agentID, fields)
@@ -668,6 +672,29 @@ func (m *Manager) createAgentBeadWithRetry(agentID string, fields *beads.AgentFi
 		}
 	}
 	return fmt.Errorf("creating agent bead after %d attempts: %w", doltMaxRetries, lastErr)
+}
+
+// recordSlungAgent records fields.Agent on the seat's intent record, the fact
+// the pool count reads for a sessionless seat (gt-2q283). Until the new
+// session's MarkSlung it is the seat's only statement of its agent, so the
+// agent bead write must record it here too (gt-bs68fg). A hold keeps the
+// record; an unwritable one is warned about, naming the seat.
+func (m *Manager) recordSlungAgent(name string, fields *beads.AgentFields) {
+	if strings.TrimSpace(fields.Agent) == "" || strings.TrimSpace(fields.HookBead) == "" {
+		return
+	}
+	seat := intentSeat(m.rig.Name, name)
+	_, err := intent.Update(m.townRoot, seat, func(r *intent.Record) error {
+		if r.Held() {
+			return nil
+		}
+		r.Agent = strings.TrimSpace(fields.Agent)
+		r.Actor, r.UpdatedAt = "gt sling", m.clk().Now().UTC()
+		return nil
+	})
+	if err != nil {
+		m.warnf("could not record the agent for seat %s: %v", seat, err)
+	}
 }
 
 // agentBeads is the Manager's Client handle on its bead database: the one
@@ -1346,8 +1373,7 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 		return nil, err
 	}
 
-	agentID := m.agentBeadID(name)
-	if err = m.createAgentBeadWithRetry(agentID, &beads.AgentFields{
+	if err = m.createAgentBeadWithRetry(name, &beads.AgentFields{
 		RoleType:   "polecat",
 		Rig:        m.rig.Name,
 		AgentState: "spawning",
@@ -1593,8 +1619,7 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	// HookBead is set atomically at creation time if provided (avoids cross-beads routing issues).
 	// Uses CreateOrReopenAgentBead to handle re-spawning with same name (GH #332).
 	// Retries with backoff — a polecat without an agent bead is untrackable (gt-94llt7).
-	agentID := m.agentBeadID(name)
-	if err = m.createAgentBeadWithRetry(agentID, &beads.AgentFields{
+	if err = m.createAgentBeadWithRetry(name, &beads.AgentFields{
 		RoleType:   "polecat",
 		Rig:        m.rig.Name,
 		AgentState: "spawning",
@@ -2486,7 +2511,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	// HookBead is set atomically at recreation time if provided.
 	// Uses CreateOrReopenAgentBead to handle re-spawning with same name (GH #332).
 	// Retries with backoff — a polecat without an agent bead is untrackable (gt-94llt7).
-	if err = m.createAgentBeadWithRetry(agentID, &beads.AgentFields{
+	if err = m.createAgentBeadWithRetry(name, &beads.AgentFields{
 		RoleType:   "polecat",
 		Rig:        m.rig.Name,
 		AgentState: "spawning",
@@ -2737,8 +2762,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// completion metadata, cleanup_status or active_mr from the last run), so
 	// the bead needs no separate reset write first: one Dolt commit, not
 	// reset, rewrite and a state sync.
-	agentID := m.agentBeadID(name)
-	if err = m.createAgentBeadWithRetry(agentID, &beads.AgentFields{
+	if err = m.createAgentBeadWithRetry(name, &beads.AgentFields{
 		RoleType:   "polecat",
 		Rig:        m.rig.Name,
 		AgentState: "spawning",
