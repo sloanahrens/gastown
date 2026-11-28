@@ -217,6 +217,9 @@ type packageResult struct {
 	logErr error
 	// tests are the top-level tests the stream ended, for the slow-test lines.
 	tests []TestTime
+	// cgroup is what the container spent while the package ran, when the run
+	// could read it; nil leaves the key off the package's timing line.
+	cgroup *CgroupSample
 }
 
 // tasks resolves each package's fate before anything runs. A skipped package
@@ -476,7 +479,7 @@ func (r *Runner) report(tier string, t *task) {
 		fmt.Fprintf(r.Stderr, "    create log %s: %v\n", res.log, res.createErr)
 		return
 	}
-	r.addTiming(tier, t.name, res.start, res.code, res.log)
+	r.addTiming(tier, t.name, res)
 	r.addSlowTests(tier, t.name, res.tests)
 	r.reportLog(tier, t)
 }
@@ -545,17 +548,18 @@ func (r *Runner) now() time.Time {
 }
 
 // addTiming records one started package's line in the run's timings.
-func (r *Runner) addTiming(tier, name string, start time.Time, code int, log string) {
+func (r *Runner) addTiming(tier, name string, res packageResult) {
 	if r.Timings == nil {
 		return
 	}
 	r.Timings.Add(Timing{
 		Tier:    tier,
 		Package: name,
-		WallMS:  r.now().Sub(start).Milliseconds(),
-		TestMS:  r.testElapsed(log),
-		Exit:    code,
-		Start:   start.Format(time.RFC3339Nano),
+		WallMS:  r.now().Sub(res.start).Milliseconds(),
+		TestMS:  r.testElapsed(res.log),
+		Exit:    res.code,
+		Start:   res.start.Format(time.RFC3339Nano),
+		Cgroup:  res.cgroup,
 	})
 }
 
