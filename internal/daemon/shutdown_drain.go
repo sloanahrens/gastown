@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/manifestdata"
+	"github.com/steveyegge/gastown/internal/townflight"
 )
 
 // ShutdownDrainBound is how long a SIGTERM waits for the landing pass and the
@@ -26,9 +27,10 @@ func (d *Daemon) shutdownDrainBound() time.Duration {
 }
 
 // drainForShutdown is the SIGTERM drain. The daemon starts nothing new: the
-// draining flag stops spec-dispatch ticks and tier sweeps, the shutdown-drain
-// hold stops the landing workers from starting a pass and makes a pass in flight
-// stop claiming beads, and the spec-sling set stops every sling from starting.
+// draining flag stops spec-dispatch ticks and tier sweeps, the town's drain
+// marker makes townflight refuse a listed command, the shutdown-drain hold stops
+// the landing workers from starting a pass and makes a pass in flight stop
+// claiming beads, and the spec-sling set stops every sling from starting.
 // The landing step and the slings already in flight are waited for, together,
 // up to ShutdownDrainBound: a sling's kill would come from the cancel the caller
 // makes after this returns, so waiting here lets it finish (gt-d4jrdc). It
@@ -38,6 +40,11 @@ func (d *Daemon) shutdownDrainBound() time.Duration {
 // short.
 func (d *Daemon) drainForShutdown(sigChan <-chan os.Signal) os.Signal {
 	d.draining.Store(true)
+	// A marker that cannot be written is logged and the drain goes on: a
+	// shutdown is never blocked by the marker.
+	if err := townflight.StartDrain(d.config.TownRoot); err != nil {
+		d.logger.Printf("draining for shutdown: could not mark the town draining, so a listed command may still start: %v", err)
+	}
 	// The holds are taken before the in-flight counts are read: a pass or a sling
 	// that starts after its hold is refused, and one that ends in between wakes
 	// its channel, so neither is missed (landing_hold.go, spec_slings.go stop).
