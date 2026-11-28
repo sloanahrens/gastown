@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
@@ -465,6 +466,8 @@ type attentionSources struct {
 	// the seat-unreachable collector queues (seat_unreachable_patrol.go,
 	// gt-q6hafz).
 	seatUnreachable func() []attention.Item
+	// formulasStalePlan reads the town's formula sync plan; nil is formula.PlanFormulaSync over d.config.TownRoot (gt-u661sv).
+	formulasStalePlan func(townRoot string) (*formula.SyncPlan, error)
 }
 
 // writeAttention is the heartbeat step after townhealth (gt-vsct7.2): it runs
@@ -899,6 +902,8 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// The bd gateway's refused calls grown past five in the hour (gt-xu8fkg).
 		// A failed read raises the probe-failed item and keeps the previous one.
 		{kind: attention.KindBdGatewayRefusals, collect: s.collectGatewayRefusals},
+		// A town formula that differs from the binary's (gt-u661sv).
+		{kind: attention.KindFormulasStale, collect: s.collectFormulasStale},
 	}, s.questionCollectors()...)
 }
 
