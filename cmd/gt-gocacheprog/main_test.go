@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/gocacheprog"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
@@ -149,5 +152,117 @@ func TestProbeWritable(t *testing.T) {
 				t.Errorf("probeWritable = %v, want an error naming %q and %q", err, dir, tc.want)
 			}
 		})
+	}
+}
+
+// answerLog collects run's stdout and closes ready once the put's answer is
+// written, so the gated get is read only after the put reached the store.
+type answerLog struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	lines int
+	ready chan struct{}
+}
+
+func (l *answerLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n, err := l.buf.Write(p)
+	l.lines += bytes.Count(p, []byte("\n"))
+	if l.lines >= 2 {
+		select {
+		case <-l.ready:
+		default:
+			close(l.ready)
+		}
+	}
+	return n, err
+}
+
+// String returns every response written so far.
+func (l *answerLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+// gateReader holds every read until ready closes, then reads from inner: Serve
+// answers in parallel, so the get that reads a put back waits for the put's
+// answer, which proves the put reached the store.
+type gateReader struct {
+	ready <-chan struct{}
+	inner io.Reader
+}
+
+func (g *gateReader) Read(p []byte) (int, error) {
+	select {
+	case <-g.ready:
+		return g.inner.Read(p)
+	case <-time.After(10 * time.Second): //testpolicy:allow no-sleep — a hang guard: Serve owes the put's answer, so this fires only when it never writes it
+		return 0, errors.New("gateReader: the put's answer never arrived")
+	}
+}
+
+// TestProgSession: one session over a temp dir — a put, the get that hits it, a
+// get that misses and a close — asserts the handshake, each answer, the body at
+// the put's path, a zero exit and empty stderr (gt-gwqs4l).
+func TestProgSession(t *testing.T) {
+	t.Parallel()
+	log := &answerLog{ready: make(chan struct{})}
+	head := `{"ID":1,"Command":"put","ActionID":"YWE=","OutputID":"YmI=","BodySize":5}` + "\n" + `"aGVsbG8="` + "\n"
+	tail := `{"ID":2,"Command":"get","ActionID":"YWE="}` + "\n" + `{"ID":3,"Command":"get","ActionID":"Y2M="}` + "\n" + `{"ID":4,"Command":"close"}` + "\n"
+	in := io.MultiReader(strings.NewReader(head), &gateReader{ready: log.ready, inner: strings.NewReader(tail)})
+	var stderr bytes.Buffer
+	if code := run([]string{"-dir", t.TempDir()}, in, log, &stderr, writableCheck); code != 0 {
+		t.Fatalf("run = %d, stderr %q: want exit 0", code, stderr.String())
+	}
+	if got := stderr.String(); got != "" {
+		t.Errorf("stderr = %q, want empty", got)
+	}
+	got := responses(t, log.String())
+	if len(got) != 5 {
+		t.Fatalf("responses = %+v, want the handshake and one answer per request (5)", got)
+	}
+	want := gocacheprog.Response{KnownCommands: []gocacheprog.Cmd{gocacheprog.CmdGet, gocacheprog.CmdPut, gocacheprog.CmdClose}}
+	if !reflect.DeepEqual(got[0], want) {
+		t.Errorf("handshake = %+v, want %+v", got[0], want)
+	}
+	// The gets answer in either order, so the answers are looked up by ID.
+	byID := make(map[int64]gocacheprog.Response, len(got))
+	for _, resp := range got[1:] {
+		byID[resp.ID] = resp
+	}
+	put := byID[1]
+	if put.Err != "" {
+		t.Fatalf("put answer = %+v, want no error", put)
+	}
+	body, err := os.ReadFile(put.DiskPath)
+	if err != nil {
+		t.Fatalf("body at the put's path %q: %v", put.DiskPath, err)
+	}
+	if string(body) != "hello" {
+		t.Errorf("body at the put's path = %q, want %q", body, "hello")
+	}
+	hit := byID[2]
+	if hit.Miss {
+		t.Errorf("get of the put's action id = %+v, want a hit", hit)
+	}
+	if string(hit.OutputID) != "bb" {
+		t.Errorf("hit OutputID = %q, want %q", hit.OutputID, "bb")
+	}
+	if hit.Size != 5 {
+		t.Errorf("hit Size = %d, want 5", hit.Size)
+	}
+	if hit.DiskPath != put.DiskPath {
+		t.Errorf("hit DiskPath = %q, want the put's %q", hit.DiskPath, put.DiskPath)
+	}
+	if hit.Time == nil {
+		t.Errorf("hit = %+v, want a Time", hit)
+	}
+	if miss := byID[3]; !miss.Miss {
+		t.Errorf("get of an unwritten action id = %+v, want a miss", miss)
+	}
+	if last := got[len(got)-1]; last.ID != 4 {
+		t.Errorf("last answer = %+v, want the close for ID 4", last)
 	}
 }
