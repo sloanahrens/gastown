@@ -16,7 +16,9 @@ import (
 	"github.com/steveyegge/gastown/deploy/k8s"
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
+	forgejoserver "github.com/steveyegge/gastown/deploy/k8s/forgejo-server"
 	"github.com/steveyegge/gastown/deploy/k8s/sbx"
+	"github.com/steveyegge/gastown/internal/k8spolicy"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -99,13 +101,15 @@ func driftDepsFor(out io.Writer, f clusterDriftFlags) clusterDriftDeps {
 // clusterDriftDeps is what a drift run takes from the host: the render's own
 // seams for the town, the values file and the manifests, the gate runner's
 // render, the hand-applied objects' targets from the embedded documents, the
-// embedded static set, the checked-in exceptions file and the run's clock, the
-// kubectl runner that reads the live objects, and where it prints.
+// embedded static set, the Forgejo server's manifest objects, the checked-in
+// exceptions file and the run's clock, the kubectl runner that reads the live
+// objects, and where it prints.
 type clusterDriftDeps struct {
 	render        clusterRenderDeps
 	runner        func() ([]driftTarget, error)
 	policyTargets func() ([]driftTarget, error)
 	staticObjects func() ([]k8s.StaticObject, error)
+	forgejo       func() ([]map[string]any, error)
 	exceptions    func() []byte
 	now           func() time.Time
 	kubectl       update.RunFunc
@@ -125,11 +129,22 @@ func realClusterDriftDeps(out io.Writer) clusterDriftDeps {
 		runner:        realRunnerDriftTargets,
 		policyTargets: policyDriftTargets,
 		staticObjects: k8s.Static,
+		forgejo:       func() ([]map[string]any, error) { return forgejoObjectsFrom(k8s.ControlHostsYAML) },
 		exceptions:    func() []byte { return k8s.DriftExceptionsYAML },
 		now:           time.Now,
 		kubectl:       realRunFunc(),
 		out:           out,
 	}
+}
+
+// forgejoObjectsFrom is the Forgejo server's objects from a hosts file: the
+// control plane host it names fills server.yaml's database value (gt-8l6jr4).
+func forgejoObjectsFrom(hostsYAML []byte) ([]map[string]any, error) {
+	host, err := k8spolicy.ControlPlaneHost(hostsYAML)
+	if err != nil {
+		return nil, fmt.Errorf("reading the control plane host for the Forgejo server: %w", err)
+	}
+	return forgejoserver.Objects(host)
 }
 
 // staticPolicyTargets is the hand-applied objects' targets through the seam. A
@@ -150,6 +165,15 @@ func (d clusterDriftDeps) staticSet() ([]k8s.StaticObject, error) {
 		return nil, errors.New("no embedded static objects are wired, so the static set cannot be compared")
 	}
 	return d.staticObjects()
+}
+
+// forgejoManifestObjects is the Forgejo objects through the seam: a deps value
+// without one is an error, never a server silently left out of the compare.
+func (d clusterDriftDeps) forgejoManifestObjects() ([]map[string]any, error) {
+	if d.forgejo == nil {
+		return nil, errors.New("no render of the Forgejo server's manifest objects is wired, so the server cannot be compared")
+	}
+	return d.forgejo()
 }
 
 // runnerTargets is the gate runner's targets through the seam. A deps value built
