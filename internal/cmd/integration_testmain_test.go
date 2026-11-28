@@ -45,7 +45,7 @@ func TestMain(m *testing.M) {
 		_ = flag.Set("test.parallel", "1")
 	}
 
-	h, err := testutil.StartHermetic(testutil.WithDolt())
+	h, err := testutil.StartHermetic(testutil.WithDolt(), testutil.WithDoltPoolInits(24))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration TestMain: %v\n", err)
 		os.Exit(1)
