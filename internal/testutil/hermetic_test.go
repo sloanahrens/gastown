@@ -387,3 +387,22 @@ func TestFinish_DoltCatalogGuardFailsLoud(t *testing.T) {
 		}
 	}
 }
+
+// processHost wires the Dolt pool's template-count seam; the fake records each
+// number and returns its set error. 0 is refused without writing the setting.
+func TestHermeticProcessHostSetsPoolInitsSeam(t *testing.T) {
+	t.Parallel()
+	if processHost().setDoltPoolInits == nil {
+		t.Fatal("processHost() left setDoltPoolInits unset")
+	}
+	if err := processHost().setDoltPoolInits(0); err == nil || !strings.Contains(err.Error(), "0 template") {
+		t.Errorf("processHost seam(0) = %v, want the SetDoltPoolInits refusal naming 0", err)
+	}
+
+	f := newFakeHarness(t)
+	errSet := errors.New("fake: pool refused")
+	f.poolInitsErr = errSet
+	if err := f.setDoltPoolInits(7); !errors.Is(err, errSet) || !slices.Equal(f.poolInits, []int{7}) {
+		t.Errorf("fake seam(7) = %v, recorded %v; want the set error and [7]", err, f.poolInits)
+	}
+}

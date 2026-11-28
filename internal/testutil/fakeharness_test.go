@@ -78,6 +78,9 @@ type fakeHarness struct {
 	calls   []string
 	outputs map[string]fakeOutput // joined argv (tool name first) -> result
 	socket  string
+
+	poolInits    []int
+	poolInitsErr error
 }
 
 type fakeOutput struct {
@@ -105,6 +108,12 @@ func newFakeHarness(t *testing.T, env ...string) *fakeHarness {
 		forbidden:     func(string) bool { return false },
 		stderr:        f.stderr,
 		tempDir:       t.TempDir(),
+	}
+	f.setDoltPoolInits = func(n int) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.poolInits = append(f.poolInits, n)
+		return f.poolInitsErr
 	}
 	return f
 }
