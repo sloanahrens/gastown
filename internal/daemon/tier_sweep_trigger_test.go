@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/jonboulle/clockwork"
@@ -17,7 +18,9 @@ import (
 )
 
 // awaitOrFailTimeout bounds every channel wait in this file. The acceptance
-// cap is five seconds for a silent channel to fail its test.
+// cap is five seconds for a silent channel to fail its test. Inside a
+// synctest bubble it is fake time: it advances only when every goroutine of the
+// bubble is durably blocked, so host load cannot fire it.
 const awaitOrFailTimeout = 2 * time.Second
 
 // awaitTarget is the part of *testing.T awaitOrFail uses. It is an interface
@@ -337,6 +340,10 @@ func TestLogTierSweepNotStartingBuildsTheDetailOnlyWhenItLogs(t *testing.T) {
 // and fetch lines.
 func TestTierSweepCycleNamesTheStepItIsIn(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testTierSweepCycleNamesTheStepItIsIn)
+}
+
+func testTierSweepCycleNamesTheStepItIsIn(t *testing.T) {
 	now := atHour(time.Now(), 15)
 	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
 	rec.green()

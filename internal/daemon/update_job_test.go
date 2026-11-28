@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/jonboulle/clockwork"
@@ -932,6 +933,10 @@ func TestUpdateJobRefusedLaunchWaitsOutTheBackoff(t *testing.T) {
 // the timeout is logged as a timeout.
 func TestUpdateJobBlockingCreateTimesOut(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testUpdateJobBlockingCreateTimesOut)
+}
+
+func testUpdateJobBlockingCreateTimesOut(t *testing.T) {
 	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
 	r.cluster.hang = true
 	r.d.updateTrigger.jobBound = testUpdateJobBound
@@ -963,6 +968,10 @@ func TestUpdateJobBlockingCreateTimesOut(t *testing.T) {
 // launch, so no backoff is noted for it.
 func TestUpdateJobHungCreateIsNotStacked(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testUpdateJobHungCreateIsNotStacked)
+}
+
+func testUpdateJobHungCreateIsNotStacked(t *testing.T) {
 	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
 	r.cluster.hang = true
 	r.cluster.ignoreCtx = true
